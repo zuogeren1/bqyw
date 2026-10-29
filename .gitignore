@@ -1,0 +1,42 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 运行产物 ----
+logs/
+*.log
+.work/
+_scratch/
+
+# ---- 打包产物 ----
+build/
+dist/
+
+# ---- 本地笔记（不进仓库） ----
+.notes/
+
+# ---- 素材 ----
+# refs/ 是实机截图（25MB），切模板的原料。
+# 程序运行只需要 templates/，所以默认不把原始截图带进仓库；
+# 想留档就把下面这行删掉。
+refs/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+nul
+
+# 说明
+#   templates/ 由 tools/extract_templates.py 从 refs/ 切出来的卡头模板，
+#              程序运行必须要它，体积只有 32KB，所以**保留跟踪** ——
+#              拿到仓库就能直接跑，不用先跑切模板脚本。
+#   docs/      README 里引用的界面截图，保留跟踪。

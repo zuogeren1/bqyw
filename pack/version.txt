@@ -1,0 +1,29 @@
+# -*- coding: utf-8 -*-
+# PyInstaller 的 Windows 版本资源。
+# 改版本号时这里和 bqyw/__init__.py 的 __version__ 要一起改。
+VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=(1, 0, 0, 0),
+        prodvers=(1, 0, 0, 0),
+        mask=0x3F,
+        flags=0x0,
+        OS=0x40004,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo([
+            StringTable("080404b0", [
+                StringStruct("FileDescription", "百趣演武 自动抽牌"),
+                StringStruct("FileVersion", "1.0.0.0"),
+                StringStruct("InternalName", "bqyw"),
+                StringStruct("LegalCopyright", "MPL-2.0"),
+                StringStruct("OriginalFilename", "百趣演武自动抽牌.exe"),
+                StringStruct("ProductName", "百趣演武 自动抽牌"),
+                StringStruct("ProductVersion", "1.0.0.0"),
+            ]),
+        ]),
+        VarFileInfo([VarStruct("Translation", [2052, 1200])]),
+    ],
+)

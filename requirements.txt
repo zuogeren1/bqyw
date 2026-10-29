@@ -1,0 +1,11 @@
+# ---- 跑程序需要 ----
+# 本机 conda base 已全部具备，一般不用装；换机器再按这个装。
+mss>=10
+numpy>=1.26
+opencv-python>=4.8
+pywin32>=306
+pydirectinput>=1.0.4
+
+# ---- 只有开发才需要，跑程序用不上 ----
+# pyinstaller>=6.0   把程序打成 dist/百趣演武自动抽牌.exe（python tools/build.py）
+# pillow>=10         生成 assets/icon.ico（python tools/make_icon.py）
