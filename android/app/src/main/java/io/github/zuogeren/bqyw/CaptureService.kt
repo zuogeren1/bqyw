@@ -40,6 +40,7 @@ class CaptureService : Service() {
         const val EXTRA_TARGET = "target"
         const val EXTRA_MAX = "max"
         const val EXTRA_HAND = "hand"
+        const val EXTRA_ORDERED = "ordered"
 
         @Volatile
         var instance: CaptureService? = null
@@ -63,8 +64,12 @@ class CaptureService : Service() {
 
     fun hasProjection(): Boolean = reader != null
 
-    fun startBotFromUi(spec: String, maxAttempts: Int, hand: String? = null) =
-        startBot(spec, maxAttempts, hand)
+    fun startBotFromUi(
+        spec: String,
+        maxAttempts: Int,
+        hand: String? = null,
+        ordered: Boolean = false,
+    ) = startBot(spec, maxAttempts, hand, ordered)
 
     fun stopBotFromUi() = stopBot()
 
@@ -97,6 +102,7 @@ class CaptureService : Service() {
                     intent.getStringExtra(EXTRA_TARGET) ?: "",
                     intent.getIntExtra(EXTRA_MAX, 0),
                     intent.getStringExtra(EXTRA_HAND),
+                    intent.getBooleanExtra(EXTRA_ORDERED, false),
                 )
             }
             ACTION_STOP_BOT -> stopBot()
@@ -166,7 +172,12 @@ class CaptureService : Service() {
     }
 
     // ------------------------------------------------------------ 机器人
-    private fun startBot(spec: String, maxAttempts: Int, handName: String? = null) {
+    private fun startBot(
+        spec: String,
+        maxAttempts: Int,
+        handName: String? = null,
+        ordered: Boolean = false,
+    ) {
         if (reader == null) {
             BotLog.add("还没授权抓屏，先在 App 里点「授权抓屏」")
             return
@@ -178,7 +189,7 @@ class CaptureService : Service() {
         val hand = handName?.takeIf { it.isNotBlank() }
             ?.let { n -> Hand.values().firstOrNull { it.name == n } }
         val target = try {
-            Target(Targets.parse(spec).wants, hand)
+            Target(Targets.parse(spec).wants, hand, ordered)
         } catch (e: Throwable) {
             BotLog.add("目标写法不对：" + (e.message ?: ""))
             return

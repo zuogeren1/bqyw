@@ -4,11 +4,20 @@ package io.github.zuogeren.bqyw
  * 目标：要么按「牌型」，要么按「点数组合」（可以带花色）。
  * 选了牌型就按牌型判定，点数那组直接忽略。
  */
-class Target(val wants: List<Card>, val hand: Hand? = null) {
+class Target(val wants: List<Card>, val hand: Hand? = null, val ordered: Boolean = false) {
 
     fun matches(cards: List<Card>): Boolean {
         if (hand != null) return Hands.best(cards) == hand
         if (cards.size < wants.size) return false
+        if (ordered) {
+            for (i in wants.indices) {
+                val w = wants[i]
+                val c = cards[i]
+                if (w.point != 0 && w.point != c.point) return false
+                if (w.suit != 0 && w.suit != c.suit) return false
+            }
+            return true
+        }
         return fit(wants.toMutableList(), cards.take(wants.size))
     }
 
@@ -31,6 +40,11 @@ class Target(val wants: List<Card>, val hand: Hand? = null) {
 
     override fun toString(): String {
         if (hand != null) return hand.cn
+        val body = describe()
+        return if (ordered) body + "（按顺序）" else body
+    }
+
+    private fun describe(): String {
         return wants.joinToString(" ") { w ->
             when {
                 w.point == 0 -> "任意"
@@ -39,6 +53,7 @@ class Target(val wants: List<Card>, val hand: Hand? = null) {
             }
         }
     }
+
 
     companion object {
         val SUIT_CN = arrayOf("", "萬", "筒", "索")
