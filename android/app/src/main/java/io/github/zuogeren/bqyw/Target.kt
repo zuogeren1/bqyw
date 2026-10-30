@@ -11,14 +11,44 @@ class Target(val wants: List<Card>, val hand: Hand? = null, val ordered: Boolean
         if (cards.size < wants.size) return false
         if (ordered) {
             for (i in wants.indices) {
-                val w = wants[i]
-                val c = cards[i]
-                if (w.point != 0 && w.point != c.point) return false
-                if (w.suit != 0 && w.suit != c.suit) return false
+                if (!one(cards[i], wants[i])) return false
             }
             return true
         }
         return fit(wants.toMutableList(), cards.take(wants.size))
+    }
+
+    /**
+     * 还剩 left 抽，还有没有可能达成。
+     *
+     * 和 [matches] 的区别：这里只问「已经抽到的牌放不放得进目标位」，
+     * 剩下的空位留给后面抽。给 false 就说明这手牌已经废了，可以提前重开。
+     */
+    fun possible(cards: List<Card>, left: Int): Boolean {
+        if (hand != null) return Deck.reachable(cards, hand, left)
+        if (cards.size > wants.size) return false
+        if (ordered) {
+            for (i in cards.indices) {
+                if (!one(cards[i], wants[i])) return false
+            }
+            return true
+        }
+        return fits(wants.toMutableList(), cards)
+    }
+
+    private fun one(c: Card, w: Card): Boolean =
+        (w.point == 0 || w.point == c.point) && (w.suit == 0 || w.suit == c.suit)
+
+    /** 把 drawn 一张张派进 slots，派得进去就叫还有戏（空位后面再抽）。 */
+    private fun fits(slots: MutableList<Card>, drawn: List<Card>): Boolean {
+        if (drawn.isEmpty()) return true
+        for (i in slots.indices) {
+            if (!one(drawn[0], slots[i])) continue
+            val rest = ArrayList(slots)
+            rest.removeAt(i)
+            if (fits(rest, drawn.subList(1, drawn.size))) return true
+        }
+        return false
     }
 
     private fun fit(left: MutableList<Card>, cards: List<Card>): Boolean {
@@ -27,9 +57,7 @@ class Target(val wants: List<Card>, val hand: Hand? = null, val ordered: Boolean
         val c = cards[0]
         for (i in left.indices) {
             val w = left[i]
-            val pointOk = w.point == 0 || w.point == c.point
-            val suitOk = w.suit == 0 || w.suit == c.suit
-            if (pointOk && suitOk) {
+            if (one(c, w)) {
                 val rest = ArrayList(left)
                 rest.removeAt(i)
                 if (fit(rest, cards.subList(1, cards.size))) return true

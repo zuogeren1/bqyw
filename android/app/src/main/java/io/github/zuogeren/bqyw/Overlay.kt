@@ -42,6 +42,7 @@ class Overlay(private val ctx: Context) {
     private val suit = intArrayOf(0, 0, 0, 0, 0)
     private var handIdx = 0
     private var ordered = false
+    private var fast = false
     private val handOptions: List<Hand?> = listOf(null) + Hand.values().toList()
 
     private var mode = MODE_MAIN
@@ -160,6 +161,15 @@ class Overlay(private val ctx: Context) {
             setOnCheckedChangeListener { _, v -> ordered = v }
         }
         b.addView(orderBox)
+
+        val fastBox = CheckBox(ctx).apply {
+            text = "快速模式（连点铺满，不提前放弃）"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            isChecked = fast
+            setOnCheckedChangeListener { _, v -> fast = v }
+        }
+        b.addView(fastBox)
 
         val hint = TextView(ctx).apply {
             setTextColor(Color.parseColor("#FFFFC857"))
@@ -331,7 +341,7 @@ class Overlay(private val ctx: Context) {
             BotLog.add("服务没在跑，先回 App 授权抓屏")
             return
         }
-        svc.startBotFromUi(targetSpec(), 0, handOptions[handIdx]?.name, ordered)
+        svc.startBotFromUi(targetSpec(), 0, handOptions[handIdx]?.name, ordered, fast)
         collapse()
     }
 

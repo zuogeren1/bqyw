@@ -41,6 +41,7 @@ class CaptureService : Service() {
         const val EXTRA_MAX = "max"
         const val EXTRA_HAND = "hand"
         const val EXTRA_ORDERED = "ordered"
+        const val EXTRA_FAST = "fast"
 
         @Volatile
         var instance: CaptureService? = null
@@ -69,7 +70,8 @@ class CaptureService : Service() {
         maxAttempts: Int,
         hand: String? = null,
         ordered: Boolean = false,
-    ) = startBot(spec, maxAttempts, hand, ordered)
+        fast: Boolean = false,
+    ) = startBot(spec, maxAttempts, hand, ordered, fast)
 
     fun stopBotFromUi() = stopBot()
 
@@ -103,6 +105,7 @@ class CaptureService : Service() {
                     intent.getIntExtra(EXTRA_MAX, 0),
                     intent.getStringExtra(EXTRA_HAND),
                     intent.getBooleanExtra(EXTRA_ORDERED, false),
+                    intent.getBooleanExtra(EXTRA_FAST, false),
                 )
             }
             ACTION_STOP_BOT -> stopBot()
@@ -177,6 +180,7 @@ class CaptureService : Service() {
         maxAttempts: Int,
         handName: String? = null,
         ordered: Boolean = false,
+        fast: Boolean = false,
     ) {
         if (reader == null) {
             BotLog.add("还没授权抓屏，先在 App 里点「授权抓屏」")
@@ -201,7 +205,11 @@ class CaptureService : Service() {
 
         botStop = false
         botRunning = true
-        BotLog.add("开始：目标 " + target + (if (maxAttempts > 0) "，重开上限 " + maxAttempts else ""))
+        BotLog.add(
+            "开始：目标 " + target +
+                (if (fast) "，快速模式" else "") +
+                (if (maxAttempts > 0) "，重开上限 " + maxAttempts else ""),
+        )
         botThread = Thread {
             var reason = "no_tap"
             try {
@@ -214,7 +222,7 @@ class CaptureService : Service() {
                     return@Thread
                 }
                 BotLog.add("点按方式：" + Tap.current())
-                reason = Bot(engine, target, maxAttempts) { BotLog.add(it) }.run()
+                reason = Bot(engine, target, maxAttempts, fast) { BotLog.add(it) }.run()
             } catch (e: Throwable) {
                 BotLog.add("运行出错：" + e.javaClass.simpleName + " " + (e.message ?: ""))
             } finally {
@@ -250,6 +258,7 @@ class CaptureService : Service() {
         "stopped" -> "已停止"
         "round2" -> "不是第 1 轮"
         "stuck" -> "牌桌一直是空的"
+        "stuck_draw" -> "抽牌一直没反应"
         "noframe" -> "没有画面"
         "no_round" -> "读不到轮次"
         "no_tap" -> "没有可用的点按方式"
