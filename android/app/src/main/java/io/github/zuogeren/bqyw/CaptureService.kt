@@ -34,6 +34,7 @@ class CaptureService : Service() {
         const val ACTION_START = "start"
         const val ACTION_START_BOT = "start_bot"
         const val ACTION_STOP_BOT = "stop_bot"
+        const val ACTION_SHOW_OVERLAY = "show_overlay"
         const val EXTRA_CODE = "code"
         const val EXTRA_DATA = "data"
         const val EXTRA_TARGET = "target"
@@ -48,6 +49,8 @@ class CaptureService : Service() {
     private var display: VirtualDisplay? = null
     private var worker: Thread? = null
 
+    private var overlay: Overlay? = null
+
     private var botThread: Thread? = null
     @Volatile private var botStop = false
     @Volatile private var botRunning = false
@@ -56,12 +59,32 @@ class CaptureService : Service() {
 
     fun hasProjection(): Boolean = reader != null
 
+    fun startBotFromUi(spec: String, maxAttempts: Int) = startBot(spec, maxAttempts)
+
+    fun stopBotFromUi() = stopBot()
+
+    private fun ensureOverlay() {
+        if (overlay?.isShowing == true) return
+        if (!android.provider.Settings.canDrawOverlays(this)) return
+        try {
+            overlay = Overlay(this).also { it.show() }
+        } catch (e: Throwable) {
+            BotLog.add("悬浮球开不起来：" + e.javaClass.simpleName)
+        }
+    }
+
     fun isBotRunning(): Boolean = botRunning
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         instance = this
         BotLog.attach(getExternalFilesDir(null))
-        startInForeground()
+        // 只有真的要抓屏时才用 mediaProjection 类型：没有授权却声明它，
+        // startForeground 会直接抛异常把进程带走（实测整个 App 被杀）
+        val capturing = intent?.action != ACTION_START_BOT &&
+            intent?.action != ACTION_STOP_BOT &&
+            intent?.action != ACTION_SHOW_OVERLAY
+        startInForeground(capturing)
+        ensureOverlay()
 
         when (intent?.action) {
             ACTION_START_BOT -> {
@@ -71,6 +94,7 @@ class CaptureService : Service() {
                 )
             }
             ACTION_STOP_BOT -> stopBot()
+            ACTION_SHOW_OVERLAY -> ensureOverlay()
             else -> {
                 val code = intent?.getIntExtra(EXTRA_CODE, 0) ?: 0
                 val data: Intent? = if (Build.VERSION.SDK_INT >= 33) {
@@ -85,7 +109,7 @@ class CaptureService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startInForeground() {
+    private fun startInForeground(capturing: Boolean) {
         val nm = getSystemService(NotificationManager::class.java)
         if (nm.getNotificationChannel(CHANNEL) == null) {
             nm.createNotificationChannel(
@@ -98,13 +122,19 @@ class CaptureService : Service() {
             .setOngoing(true)
             .build()
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(1, note, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            val type = if (capturing) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            }
+            startForeground(1, note, type)
         } else {
             startForeground(1, note)
         }
     }
 
     private fun startCapture(resultCode: Int, data: Intent) {
+        if (Build.VERSION.SDK_INT >= 29) startInForeground(true)
         val mpm = getSystemService(MediaProjectionManager::class.java)
         val proj = mpm.getMediaProjection(resultCode, data) ?: return
         projection = proj
@@ -325,6 +355,8 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        overlay?.hide()
+        overlay = null
         instance = null
         stopCapture()
         super.onDestroy()

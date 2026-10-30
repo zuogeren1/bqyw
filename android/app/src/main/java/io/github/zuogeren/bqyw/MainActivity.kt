@@ -79,11 +79,44 @@ class MainActivity : Activity() {
         button("② 开始") { startBot() }
         button("③ 停止") { stopBot() }
         button("④ 授权 Shizuku") { requestShizuku() }
+        button("⑤ 授权悬浮窗") { requestOverlay() }
+        button("⑥ 显示悬浮球") { showOverlay() }
 
         root.addView(status)
         root.addView(logView)
         setContentView(root)
         handler.post(poll)
+    }
+
+    private fun requestOverlay() {
+        if (android.provider.Settings.canDrawOverlays(this)) {
+            BotLog.add("悬浮窗权限已经有了")
+            showOverlay()
+            return
+        }
+        try {
+            startActivity(
+                Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:" + packageName),
+                )
+            )
+            BotLog.add("去设置里打开「显示在其他应用上层」")
+        } catch (e: Throwable) {
+            BotLog.add("打不开悬浮窗设置：" + e.javaClass.simpleName)
+        }
+    }
+
+    private fun showOverlay() {
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            BotLog.add("还没给悬浮窗权限")
+            return
+        }
+        val intent = Intent(this, CaptureService::class.java).apply {
+            action = CaptureService.ACTION_SHOW_OVERLAY
+        }
+        startForegroundService(intent)
+        BotLog.add("悬浮球已显示（拖动移动，点一下展开）")
     }
 
     private fun requestCapture() {
