@@ -200,8 +200,10 @@ class CaptureService : Service() {
         }
 
         val dm = resources.displayMetrics
-        Geom.screenW = maxOf(dm.widthPixels, dm.heightPixels)
-        Geom.screenH = minOf(dm.widthPixels, dm.heightPixels)
+        Geom.setScreen(
+            maxOf(dm.widthPixels, dm.heightPixels),
+            minOf(dm.widthPixels, dm.heightPixels),
+        )
 
         botStop = false
         botRunning = true

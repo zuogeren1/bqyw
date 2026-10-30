@@ -10,7 +10,6 @@ import kotlin.math.min
  */
 object Badge {
 
-    private const val BASE_W = 2800f
     private const val X0 = 2624f
     private const val X1 = 2662f
     private const val Y0 = 1015f
@@ -30,13 +29,12 @@ object Badge {
     /** 1 = 第 1 轮；2 = 不是第 1 轮；0 = 读不出来（画面还没稳）。 */
     fun read(bmp: android.graphics.Bitmap): Int {
         val tpl = template ?: return 1
-        val w = bmp.width
-        val h = bmp.height
-        val s = w / BASE_W
-        val x0 = (X0 * s).toInt()
-        val x1 = min(w, (X1 * s).toInt())
-        val y0 = (Y0 * s).toInt()
-        val y1 = min(h, (Y1 * s).toInt())
+        val fit = Fit(bmp.width, bmp.height)
+        val s = fit.s
+        val x0 = fit.px(X0)
+        val x1 = min(bmp.width, fit.px(X1))
+        val y0 = fit.py(Y0)
+        val y1 = min(bmp.height, fit.py(Y1))
         if (x1 - x0 < 6 || y1 - y0 < 6) {
             lastInfo = "窗口太小 " + x0 + "," + y0 + "-" + x1 + "," + y1
             return 0

@@ -245,8 +245,9 @@ class Bot(
 
     /** 确认按钮是亮黄色，弹窗一出来就能靠它认。 */
     private fun isModal(bmp: Bitmap): Boolean {
-        val x = (1638f * bmp.width / 2800f).toInt().coerceIn(0, bmp.width - 1)
-        val y = (870f * bmp.width / 2800f).toInt().coerceIn(0, bmp.height - 1)
+        val fit = Fit(bmp.width, bmp.height)
+        val x = fit.px(1638f).coerceIn(0, bmp.width - 1)
+        val y = fit.py(870f).coerceIn(0, bmp.height - 1)
         val c = bmp.getPixel(x, y)
         val r = (c shr 16) and 0xFF
         val g = (c shr 8) and 0xFF

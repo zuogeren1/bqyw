@@ -13,7 +13,6 @@ import kotlin.math.min
  */
 object CardReader {
 
-    private const val BASE_W = 2800f
     private const val CX0 = 392f
     private const val STEP = 362.75f
     private const val HALF = 35f
@@ -44,23 +43,21 @@ object CardReader {
     fun readCards(bmp: Bitmap): List<Card> {
         val pts = pointTpl ?: return emptyList()
         val sts = suitTpl ?: return emptyList()
-        val w = bmp.width
-        val h = bmp.height
-        val s = w / BASE_W
+        val fit = Fit(bmp.width, bmp.height)
         val out = ArrayList<Card>(5)
         for (i in 0 until 5) {
             val cx = CX0 + STEP * i
-            val point = glyph(bmp, w, h,
-                cx - HALF, Y0, cx + HALF, Y1, s,
-                40f * s, 400f * s * s, pts,
+            val point = glyph(bmp, fit,
+                cx - HALF, Y0, cx + HALF, Y1,
+                40f, 400f, pts,
             )
             if (point == 0) {
                 out.add(Card(0, 0))
                 continue
             }
-            val suit = glyph(bmp, w, h,
-                cx + SUIT_X0, SUIT_Y0, cx + SUIT_X1, SUIT_Y1, s,
-                24f * s, 150f * s * s, sts,
+            val suit = glyph(bmp, fit,
+                cx + SUIT_X0, SUIT_Y0, cx + SUIT_X1, SUIT_Y1,
+                24f, 150f, sts,
             )
             out.add(Card(point, suit))
         }
@@ -70,17 +67,24 @@ object CardReader {
     fun readPoints(bmp: Bitmap): IntArray =
         readCards(bmp).map { it.point }.toIntArray()
 
-    /** 窗口（基准坐标）→ 二值化 → 最大连通块 → 归一化 → 和模板比，返回 1 起的序号或 0。 */
+    /**
+     * 窗口（基准坐标）→ 二值化 → 最大连通块 → 归一化 → 和模板比，返回 1 起的序号或 0。
+     *
+     * minH / minArea 也是基准像素下的阈值，按实际缩放换算。
+     */
     private fun glyph(
-        bmp: Bitmap, w: Int, h: Int,
-        bx0: Float, by0: Float, bx1: Float, by1: Float, s: Float,
+        bmp: Bitmap, fit: Fit,
+        bx0: Float, by0: Float, bx1: Float, by1: Float,
         minH: Float, minArea: Float,
         tpl: Array<Array<BooleanArray>>,
     ): Int {
-        val x0 = max(0, (bx0 * s).toInt())
-        val x1 = min(w, (bx1 * s).toInt())
-        val y0 = max(0, (by0 * s).toInt())
-        val y1 = min(h, (by1 * s).toInt())
+        val s = fit.s
+        val w = bmp.width
+        val h = bmp.height
+        val x0 = max(0, fit.px(bx0))
+        val x1 = min(w, fit.px(bx1))
+        val y0 = max(0, fit.py(by0))
+        val y1 = min(h, fit.py(by1))
         if (x1 - x0 < 6 || y1 - y0 < 6) return 0
         val cw = x1 - x0
         val ch = y1 - y0
@@ -89,8 +93,8 @@ object CardReader {
         val mask = Glyph.mask(px, cw, 0, 0, cw, ch, false, INK)
         val box = Glyph.biggest(
             mask, cw, ch,
-            minH.toInt().coerceAtLeast(6),
-            minArea.toInt().coerceAtLeast(30),
+            (minH * s).toInt().coerceAtLeast(6),
+            (minArea * s * s).toInt().coerceAtLeast(30),
         ) ?: return 0
         val norm = Glyph.normalize(mask, cw, box)
         var best = 0
