@@ -35,6 +35,13 @@ class Overlay(private val ctx: Context) {
     private var expanded = false
 
     private val points = intArrayOf(5, 5, 5, 5, 0)
+    private var handIndex = 0
+    private lateinit var handChip: TextView
+
+    private val handCycle: List<Hand?> = listOf(
+        null, Hand.PAIR, Hand.TWO_PAIR, Hand.TRIPS, Hand.STRAIGHT,
+        Hand.FLUSH, Hand.FULL_HOUSE, Hand.QUADS, Hand.STRAIGHT_FLUSH,
+    )
 
     private val dp: Float get() = ctx.resources.displayMetrics.density
 
@@ -102,6 +109,26 @@ class Overlay(private val ctx: Context) {
         }
         panel!!.addView(row)
 
+        val handRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, px(6))
+        }
+        handChip = TextView(ctx).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setPadding(px(10), px(5), px(10), px(5))
+            background = GradientDrawable().apply {
+                cornerRadius = px(6).toFloat()
+                setColor(Color.parseColor("#33FFFFFF"))
+            }
+            setOnClickListener {
+                handIndex = (handIndex + 1) % handCycle.size
+                renderHand()
+            }
+        }
+        handRow.addView(handChip)
+        panel!!.addView(handRow)
+
         val buttons = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
         }
@@ -159,6 +186,7 @@ class Overlay(private val ctx: Context) {
         wm.addView(container, p)
         attachDrag(ball)
         renderChips()
+        renderHand()
         handler.post(poll)
     }
 
@@ -179,6 +207,11 @@ class Overlay(private val ctx: Context) {
         }
     }
 
+    private fun renderHand() {
+        val h = handCycle[handIndex]
+        handChip.text = "牌型：" + (h?.cn ?: "不要")
+    }
+
     private fun targetSpec(): String =
         points.joinToString(" ") { if (it == 0) "任意" else it.toString() }
 
@@ -188,7 +221,7 @@ class Overlay(private val ctx: Context) {
             BotLog.add("服务没在跑，先回 App 授权抓屏")
             return
         }
-        svc.startBotFromUi(targetSpec(), 0)
+        svc.startBotFromUi(targetSpec(), 0, handCycle[handIndex]?.name)
         collapse()
     }
 

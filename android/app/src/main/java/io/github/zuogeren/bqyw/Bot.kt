@@ -9,7 +9,7 @@ import android.graphics.Bitmap
  */
 class Bot(
     private val engine: Engine,
-    private val target: PointTarget,
+    private val target: Target,
     private val maxAttempts: Int,
     private val log: (String) -> Unit,
 ) {
@@ -83,8 +83,9 @@ class Bot(
             }
             badRound = 0
 
-            val pts = CardReader.readPoints(bmp)
+            val cards = CardReader.readCards(bmp)
             bmp.recycle()
+            val pts = cards.map { it.point }.toIntArray()
             val filled = pts.count { it > 0 }
             if (filled < 5) {
                 if (filled == 0) {
@@ -112,9 +113,14 @@ class Bot(
             lastHand = handKey
             lastHandAt = now
             attempts++
-            log("第 " + attempts + " 轮：" + pts.joinToString(" ") + "，总战力 " + pts.sum())
-            if (target.matches(pts.toList())) {
-                log("命中 " + target + "，总战力 " + pts.sum())
+            val hand = Hands.best(cards)
+            log(
+                "第 " + attempts + " 轮：" + pts.joinToString(" ") +
+                    "  " + hand.cn + " ×" + hand.mult +
+                    "  总战力 " + pts.sum(),
+            )
+            if (target.matches(cards)) {
+                log("命中 " + target + "，预估奖励点 " + Hands.score(cards))
                 engine.beep()
                 return "hit"
             }
@@ -179,9 +185,9 @@ class Bot(
             val bmp = shot()
             if (bmp != null) {
                 val modal = isModal(bmp)
-                val pts = if (modal) IntArray(5) else CardReader.readPoints(bmp)
+                val empty = !modal && CardReader.readCards(bmp).all { it.point == 0 }
                 bmp.recycle()
-                if (!modal && pts.all { it == 0 }) return true
+                if (empty) return true
             }
             sleep(60)
         }
