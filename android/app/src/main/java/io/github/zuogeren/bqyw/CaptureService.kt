@@ -4,15 +4,16 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioManager
 import android.media.Image
 import android.media.ImageReader
+import android.media.ToneGenerator
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -20,8 +21,10 @@ import android.os.IBinder
 import java.io.File
 
 /**
- * 探针用的抓屏服务：真的走 MediaProjection，不是 screencap。
- * 只做三件事：拿到授权 → 建一个半分辨率的虚拟屏 → 按需把最新一帧存成 PNG。
+ * 主服务：前台服务 + MediaProjection 抓屏 + 跑抽牌状态机。
+ *
+ * 必须活在前台服务里：切到游戏后，普通 Activity 进程会被系统回收，
+ * 连 8 秒后的延时点击都发不出去（这个坑实测踩过）。
  */
 class CaptureService : Service() {
 
@@ -29,10 +32,13 @@ class CaptureService : Service() {
         const val CHANNEL = "capture"
         const val KEEP = 8
         const val ACTION_START = "start"
+        const val ACTION_START_BOT = "start_bot"
+        const val ACTION_STOP_BOT = "stop_bot"
         const val EXTRA_CODE = "code"
         const val EXTRA_DATA = "data"
+        const val EXTRA_TARGET = "target"
+        const val EXTRA_MAX = "max"
 
-        /** Activity 通过它取帧；服务停了就置空。 */
         @Volatile
         var instance: CaptureService? = null
     }
@@ -42,22 +48,39 @@ class CaptureService : Service() {
     private var display: VirtualDisplay? = null
     private var worker: Thread? = null
 
+    private var botThread: Thread? = null
+    @Volatile private var botStop = false
+    @Volatile private var botRunning = false
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    fun hasProjection(): Boolean = reader != null
+
+    fun isBotRunning(): Boolean = botRunning
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         instance = this
+        BotLog.attach(getExternalFilesDir(null))
         startInForeground()
 
-        val code = intent?.getIntExtra(EXTRA_CODE, 0) ?: 0
-        // API 33+ 用类型化的 getParcelableExtra
-        val data: Intent? = if (Build.VERSION.SDK_INT >= 33) {
-            intent?.getParcelableExtra(EXTRA_DATA, Intent::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent?.getParcelableExtra(EXTRA_DATA)
-        }
-        if (data != null && projection == null) {
-            startCapture(code, data)
+        when (intent?.action) {
+            ACTION_START_BOT -> {
+                startBot(
+                    intent.getStringExtra(EXTRA_TARGET) ?: "",
+                    intent.getIntExtra(EXTRA_MAX, 0),
+                )
+            }
+            ACTION_STOP_BOT -> stopBot()
+            else -> {
+                val code = intent?.getIntExtra(EXTRA_CODE, 0) ?: 0
+                val data: Intent? = if (Build.VERSION.SDK_INT >= 33) {
+                    intent?.getParcelableExtra(EXTRA_DATA, Intent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent?.getParcelableExtra(EXTRA_DATA)
+                }
+                if (data != null && projection == null) startCapture(code, data)
+            }
         }
         return START_NOT_STICKY
     }
@@ -70,7 +93,7 @@ class CaptureService : Service() {
             )
         }
         val note: Notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle("抓屏探针运行中")
+            .setContentTitle("终末地抽牌助手运行中")
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setOngoing(true)
             .build()
@@ -85,37 +108,139 @@ class CaptureService : Service() {
         val mpm = getSystemService(MediaProjectionManager::class.java)
         val proj = mpm.getMediaProjection(resultCode, data) ?: return
         projection = proj
-        // API 29 起必须先注册回调，否则建 VirtualDisplay 会直接抛 SecurityException
         proj.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
                 stopCapture()
             }
         }, null)
 
-        // 游戏是横屏，虚拟屏按「长边 × 短边」建，否则竖屏建出来的画布会把画面挤成一条
+        // 全分辨率：轮次徽章只有 19×40，半分辨率下认不稳（实测会乱跳）
         val dm = resources.displayMetrics
-        val w = maxOf(dm.widthPixels, dm.heightPixels) / 2
-        val h = minOf(dm.widthPixels, dm.heightPixels) / 2
+        val w = maxOf(dm.widthPixels, dm.heightPixels)
+        val h = minOf(dm.widthPixels, dm.heightPixels)
         val imgReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
         reader = imgReader
         display = proj.createVirtualDisplay(
-            "bqyw-probe", w, h, dm.densityDpi / 2,
+            "bqyw", w, h, dm.densityDpi / 2,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imgReader.surface, null, null
         )
+        CardReader.load(assets)
+        Badge.load(assets)
         startAutoSave()
     }
 
-    /** 每秒抓一帧：存 PNG 留最近 8 张，同时识别点数写进 points.log。 */
+    // ------------------------------------------------------------ 机器人
+    private fun startBot(spec: String, maxAttempts: Int) {
+        if (reader == null) {
+            BotLog.add("还没授权抓屏，先在 App 里点「授权抓屏」")
+            return
+        }
+        if (botRunning) {
+            BotLog.add("已经在跑了")
+            return
+        }
+        val target = try {
+            Targets.parse(spec)
+        } catch (e: Throwable) {
+            BotLog.add("目标写法不对：" + (e.message ?: ""))
+            return
+        }
+
+        val dm = resources.displayMetrics
+        Geom.screenW = maxOf(dm.widthPixels, dm.heightPixels)
+        Geom.screenH = minOf(dm.widthPixels, dm.heightPixels)
+
+        botStop = false
+        botRunning = true
+        BotLog.add("开始：目标 " + target + (if (maxAttempts > 0) "，重开上限 " + maxAttempts else ""))
+        botThread = Thread {
+            var reason = "shizuku"
+            try {
+                // 绑定是异步的，主线程不能等，所以放在这里
+                ShizukuLink.bind(packageName)
+                val end = System.currentTimeMillis() + 5000
+                while (!ShizukuLink.ready() && System.currentTimeMillis() < end) Thread.sleep(100)
+                if (!ShizukuLink.ready()) {
+                    BotLog.add("启动失败：" + shizukuWhy())
+                    return@Thread
+                }
+                reason = Bot(engine, target, maxAttempts) { BotLog.add(it) }.run()
+            } catch (e: Throwable) {
+                BotLog.add("运行出错：" + e.javaClass.simpleName + " " + (e.message ?: ""))
+            } finally {
+                botRunning = false
+                botThread = null
+                BotLog.add("结束（" + reasonLabel(reason) + "）")
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun shizukuWhy(): String = when {
+        !rikka.shizuku.Shizuku.pingBinder() -> "Shizuku 服务没在运行"
+        rikka.shizuku.Shizuku.checkSelfPermission() !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED -> "还没给本应用授权 Shizuku"
+        else -> "用户服务连接超时（Shizuku 可能刚重启，再点一次开始）"
+    }
+
+    private fun stopBot() {
+        if (!botRunning) return
+        botStop = true
+        BotLog.add("收到停止指令")
+    }
+
+    private fun reasonLabel(reason: String): String = when (reason) {
+        "hit" -> "命中"
+        "max" -> "达到重开上限"
+        "stopped" -> "已停止"
+        "round2" -> "不是第 1 轮"
+        "stuck" -> "牌桌一直是空的"
+        "noframe" -> "没有画面"
+        "no_round" -> "读不到轮次"
+        "shizuku" -> "Shizuku 没连上"
+        else -> reason
+    }
+
+    private val engine = object : Bot.Engine {
+        override fun frame(): Bitmap? = grabBitmap()
+
+        override fun tap(x: Int, y: Int): Boolean = ShizukuLink.tap(x, y)
+
+        override fun beep() {
+            try {
+                val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
+                tone.startTone(ToneGenerator.TONE_PROP_BEEP, 400)
+                Thread.sleep(500)
+                tone.release()
+            } catch (_: Throwable) {
+                // 没声音不影响结果
+            }
+        }
+
+        override fun isStopped(): Boolean = botStop || reader == null
+
+        override fun saveDebug(bmp: Bitmap, name: String) {
+            try {
+                val f = File(getExternalFilesDir(null), name)
+                f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 90, it) }
+            } catch (_: Throwable) {
+                // 调试用，失败无所谓
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 抓帧
     private fun startAutoSave() {
         if (worker != null) return
-        CardReader.load(assets)
         worker = Thread {
             while (reader != null) {
                 try {
-                    tick()
+                    if (!botRunning) tick()
                 } catch (_: Throwable) {
-                    // 探针：抓失败就等下一轮，不在这里报错
+                    // 抓失败就等下一轮
                 }
                 try {
                     Thread.sleep(1000)
@@ -142,13 +267,11 @@ class CaptureService : Service() {
             image.close()
         }
         try {
-            val f = File(getExternalFilesDir(null), "frame-${System.currentTimeMillis()}.png")
+            val f = File(getExternalFilesDir(null), "frame-" + System.currentTimeMillis() + ".png")
             f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
             prune()
             val pts = CardReader.readPoints(bmp)
-            val line = pts.joinToString(
-) + "  sum=" + pts.sum() + "\n"
-            File(getExternalFilesDir(null), "points.log").appendText(line)
+            File(getExternalFilesDir(null), "points.log").appendText(pts.joinToString(",") + "\n")
         } finally {
             bmp.recycle()
         }
@@ -161,13 +284,6 @@ class CaptureService : Service() {
         files.sortedBy { it.lastModified() }.take(files.size - KEEP).forEach { it.delete() }
     }
 
-    /** 最近存下来的那一张。 */
-    fun latest(): File? =
-        getExternalFilesDir(null)?.listFiles()
-            ?.filter { it.name.endsWith(".png") }
-            ?.maxByOrNull { it.lastModified() }
-
-    /** 抓最新一帧，直接给识别用。 */
     fun grabBitmap(): Bitmap? {
         val imgReader = reader ?: return null
         val image: Image = try {
@@ -182,34 +298,13 @@ class CaptureService : Service() {
         }
     }
 
-    /** 抓最新一帧存进 App 专属外部目录（adb pull 能直接拿走，不用权限）。 */
-    fun grabToDisk(): File? {
-        val imgReader = reader ?: return null
-        val image: Image = try {
-            imgReader.acquireLatestImage()
-        } catch (e: IllegalStateException) {
-            null
-        } ?: return null
-        return try {
-            val bmp = toBitmap(image)
-            val f = File(getExternalFilesDir(null), "frame-${System.currentTimeMillis()}.png")
-            f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            f
-        } finally {
-            image.close()
-        }
-    }
-
     private fun toBitmap(image: Image): Bitmap {
         val plane = image.planes[0]
         val w = image.width
         val h = image.height
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val padding = rowStride - pixelStride * w
-        val padded = Bitmap.createBitmap(
-            w + padding / pixelStride, h, Bitmap.Config.ARGB_8888
-        )
+        val stride = plane.rowStride
+        val padding = stride - plane.pixelStride * w
+        val padded = Bitmap.createBitmap(w + padding / plane.pixelStride, h, Bitmap.Config.ARGB_8888)
         padded.copyPixelsFromBuffer(plane.buffer)
         val out = Bitmap.createBitmap(padded, 0, 0, w, h)
         padded.recycle()
@@ -217,6 +312,7 @@ class CaptureService : Service() {
     }
 
     private fun stopCapture() {
+        botStop = true
         worker?.interrupt()
         worker = null
         display?.release()
@@ -232,10 +328,5 @@ class CaptureService : Service() {
         instance = null
         stopCapture()
         super.onDestroy()
-    }
-
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        stopSelf()
-        super.onTaskRemoved(rootIntent)
     }
 }
