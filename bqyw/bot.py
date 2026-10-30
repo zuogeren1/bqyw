@@ -214,7 +214,6 @@ class Bot:
         while time.time() - t0 < seconds and not self.stopped():
             actions.click_box(G.BTN_DRAW, origin=origin)
             clicks += 1
-        self.stats.draws += clicks
         elapsed = time.time() - t0
         self.log(f"      连点 {clicks} 次 / 用时 {elapsed:.1f}s")
 
@@ -230,6 +229,9 @@ class Bot:
             cards = self.wait_cards(want, timeout=2.0)
         if len(cards) < want:
             self.log(f"   [!] 只铺到 {len(cards)} 张（预期 {want}），按现有手牌判定")
+        # 记账按"真翻出几张牌"，不按点击次数：冷却期那些点击游戏直接丢掉，
+        # 算成抽牌会让结尾的战绩虚高十倍（54 次点击只换来 5 张牌）
+        self.stats.draws += len(cards)
         return cards
 
     # ---------------------------------------------------- 小区域快查
@@ -297,6 +299,32 @@ class Bot:
             self.log(f"   （放弃 {t4 - t0:.2f}s = 点击 {t1 - t0:.2f}"
                      f" + 等弹窗 {t2 - t1:.2f} + 确认 {t3 - t2:.2f}"
                      f" + 等清空 {t4 - t3:.2f}）")
+
+    # ---------------------------------------------------------- 轮次记账
+    def new_round(self) -> bool:
+        """开新一轮并记一次账；返回 False 表示到了重开上限，主循环该停了。
+
+        一轮只记一次：放弃后的第一下点击常被"重新发牌"的过场吃掉，牌桌还是空的，
+        下一圈又会回到这里，靠 _armed 挡住重复计数（否则上限会按两倍地耗）。
+        真正见过牌之后（主循环里那行 _armed = False）这一轮才算结束。
+
+        快速模式是个例外：放弃后立刻连点，新牌在下一帧就已经铺满，
+        主循环永远等不到空牌桌 —— 那条路径必须自己调这里记账，
+        否则连跑一小时也只会显示「1 轮」。
+        """
+        if self._armed:
+            return True
+        if self.max_attempts and self.stats.attempts >= self.max_attempts:
+            return False
+        self.stats.attempts += 1
+        self._armed = True
+        self.log(f"[第 {self.stats.attempts} 轮]")
+        return True
+
+    def _stop_max_attempts(self) -> str:
+        self.log(f"\n达到重开上限 {self.max_attempts}，停止")
+        self.stop_reason = "max_attempts"
+        return "max_attempts"
 
     # ---------------------------------------------------------- 主循环
     def pace(self) -> str:
@@ -485,17 +513,10 @@ class Bot:
 
             # ---- 空手：开新一轮
             # 放弃后第一次点击常被"重新发牌"的过场吃掉，牌还是空的，于是下一圈
-            # 又会走到这里。用 _armed 保证一轮只记一次账，否则重开上限会翻倍地耗。
+            # 又会走到这里；new_round() 里的 _armed 保证一轮只记一次账。
             if n == 0:
-                if not self._armed:
-                    if self.max_attempts and self.stats.attempts >= self.max_attempts:
-                        self.log(f"\n达到重开上限 {self.max_attempts}，停止")
-                        self.stop_reason = "max_attempts"
-                        return "max_attempts"
-                    self.stats.attempts += 1
-                    self._armed = True
-                    if self.stats.attempts % 10 == 1:
-                        self.log(f"[第 {self.stats.attempts} 轮]")
+                if not self.new_round():
+                    return self._stop_max_attempts()
                 if self.fast_mode and self.target.stop_count >= MAX_DRAWS:
                     # 快速模式：别先单抽一张白等 2 秒，直接开连点
                     self.draw_burst(self.fast_seconds, MAX_DRAWS)
@@ -504,6 +525,11 @@ class Bot:
                 continue
 
             # ---- 有牌：判断还要不要继续
+            # 开局牌桌上就有牌（上一局没打完就退了，或者正在抽到一半）：这已经是
+            # 第 1 轮了。不补记的话第一轮永远不记账，放弃一次之后才打出「第 1 轮」，
+            # 看起来就是「第一轮的轮数显示到第二轮去了」。
+            if not self.stats.attempts:
+                self.new_round()
             self._armed = False          # 见到牌了，下一次空手才算新的一轮
             best = best_hand(cards)
             self.log(f"   [{n}张] {[(c.point, c.suit) for c in cards]} "
@@ -518,11 +544,18 @@ class Bot:
             stop = self.target.stop_count          # 自定义目标可能只要前几张
             left = stop - n
             if left <= 0:
-                self.forfeit(wait_clear=not self.fast_mode)
-                if self.fast_mode and not self.stopped():
+                # 连点只适合「铺满 5 张」的目标：只要前几张时多抽一张就不是这个目标了，
+                # 手牌变 5 张跟目标长度对不上，一轮也中不了，只会无休止地放弃+连点
+                burst = self.fast_mode and stop >= MAX_DRAWS
+                self.forfeit(wait_clear=not burst)
+                if burst and not self.stopped():
                     # 确认之后不用等淡出/清空动画，直接开下一轮连点：
-                    # 抽牌按钮就算被动画挡着也照样吃点击，过渡期丢掉几下无所谓
+                    # 抽牌按钮就算被动画挡着也照样吃点击，过渡期丢掉几下无所谓。
+                    # 但这条路一眨眼就把新牌铺满了，主循环再也看不到空牌桌，
+                    # 所以轮数只能在这里记账（n == 0 那条分支接不到）。
                     self._grace = 0
+                    if not self.new_round():
+                        return self._stop_max_attempts()
                     self.draw_burst(self.fast_seconds, MAX_DRAWS)
                 continue
 

@@ -15,6 +15,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC = os.path.join(ROOT, "pack", "bqyw.spec")
 NAME = "百趣演武自动抽牌"
 
+# GBK 控制台打不出 "✓" 会抛 UnicodeEncodeError：包打好了，脚本却以 1 退出，
+# 让人以为打包失败。换成替换字符，别让一句提示把成败带偏
+try:
+    sys.stdout.reconfigure(errors="replace")
+except Exception:                                   # noqa: BLE001
+    pass
+
 
 def main() -> int:
     try:
