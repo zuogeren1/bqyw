@@ -13,6 +13,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.CheckBox
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -56,16 +57,9 @@ class Overlay(private val ctx: Context) {
     fun show() {
         if (root != null) return
 
-        val ball = TextView(ctx).apply {
-            text = "抽"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#CC19C37D"))
-                setStroke(px(2), Color.parseColor("#EEFFFFFF"))
-            }
+        val ball = ImageView(ctx).apply {
+            setImageResource(R.drawable.ball)
+            scaleType = ImageView.ScaleType.CENTER_CROP
             layoutParams = LinearLayout.LayoutParams(px(52), px(52))
         }
 

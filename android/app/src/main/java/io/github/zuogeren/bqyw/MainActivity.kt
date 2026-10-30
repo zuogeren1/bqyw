@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -20,7 +21,7 @@ import rikka.shizuku.Shizuku
 /** 主界面：填目标 → 授权抓屏 → 开始；日志直接显示在下面。 */
 class MainActivity : Activity() {
 
-    private lateinit var targetInput: EditText
+
     private lateinit var status: TextView
     private lateinit var logView: TextView
     private val handler = Handler(Looper.getMainLooper())
@@ -47,26 +48,27 @@ class MainActivity : Activity() {
         CardReader.load(assets)
         Badge.load(assets)
 
-        targetInput = EditText(this).apply {
-            setText("5 5 5 5 任意")
-            textSize = 16f
-        }
+
         status = TextView(this).apply {
             textSize = 15f
             setPadding(0, 24, 0, 8)
         }
         logView = TextView(this).apply { textSize = 12f }
 
+
+        // targetSdk 35+ 强制边到边：内容会画到状态栏底下，自己把 inset 补回来
+        val topInset = systemDimen("status_bar_height") + dp(16)
+        val bottomInset = systemDimen("navigation_bar_height") + dp(12)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(50, 60, 50, 30)
+            setPadding(dp(14), topInset, dp(14), bottomInset)
             gravity = Gravity.TOP
         }
         root.addView(TextView(this).apply {
-            text = "目标点数（空格分隔，写「任意」表示不挑）"
+            text = "目标在悬浮球里设置：进游戏后点悬浮球 → 牌型 / 点数 → 开始"
             textSize = 14f
+            setPadding(0, 0, 0, (8 * resources.displayMetrics.density).toInt())
         })
-        root.addView(targetInput)
 
         fun button(label: String, onClick: () -> Unit) {
             root.addView(Button(this).apply {
@@ -76,15 +78,16 @@ class MainActivity : Activity() {
         }
 
         button("① 授权抓屏") { requestCapture() }
-        button("② 开始") { startBot() }
-        button("③ 停止") { stopBot() }
-        button("④ 授权 Shizuku") { requestShizuku() }
-        button("⑤ 授权悬浮窗") { requestOverlay() }
-        button("⑥ 显示悬浮球") { showOverlay() }
+        button("② 授权 Shizuku") { requestShizuku() }
+        button("③ 授权悬浮窗") { requestOverlay() }
+        button("④ 显示悬浮球") { showOverlay() }
+        button("⑤ 停止") { stopBot() }
 
         root.addView(status)
         root.addView(logView)
         setContentView(root)
+        // 边到边之后状态栏图标默认是白的，白底上看不见；要等窗口贴上装饰视图才能设
+        window.decorView.post { lightStatusBar() }
         handler.post(poll)
     }
 
@@ -119,6 +122,29 @@ class MainActivity : Activity() {
         BotLog.add("悬浮球已显示（拖动移动，点一下展开）")
     }
 
+    private fun lightStatusBar() {
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                window.insetsController?.setSystemBarsAppearance(
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            }
+        } catch (_: Throwable) {
+            // 设不上就保持默认，不影响使用
+        }
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun systemDimen(name: String): Int {
+        val id = resources.getIdentifier(name, "dimen", "android")
+        return if (id > 0) resources.getDimensionPixelSize(id) else 0
+    }
+
     private fun requestCapture() {
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -144,47 +170,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startBot() {
-        val svc = CaptureService.instance
-        if (svc?.hasProjection() != true) {
-            BotLog.add("先点「① 授权抓屏」，并在弹窗里选「终末地」")
-            return
-        }
-        if (svc.isBotRunning()) {
-            BotLog.add("已经在跑了")
-            return
-        }
-        if (!Shizuku.pingBinder()) {
-            BotLog.add("Shizuku 服务没在运行")
-            return
-        }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            requestShizuku()
-            return
-        }
-        if (!ShizukuLink.ready()) ShizukuLink.bind(packageName)
 
-        val intent = Intent(this, CaptureService::class.java).apply {
-            action = CaptureService.ACTION_START_BOT
-            putExtra(CaptureService.EXTRA_TARGET, targetInput.text.toString())
-            putExtra(CaptureService.EXTRA_MAX, 0)
-        }
-        startForegroundService(intent)
-        BotLog.add("下发开始指令，目标：" + targetInput.text.toString())
-        // 自动切到游戏：机器人只在游戏前台时才点得对
-        try {
-            var launch = packageManager.getLaunchIntentForPackage(GAME_PKG)
-            if (launch == null) {
-                // 这个游戏没声明 LAUNCHER 入口，只能按组件名直接拉起来
-                launch = Intent().setComponent(ComponentName(GAME_PKG, GAME_ACTIVITY))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(launch)
-            BotLog.add("已切到游戏")
-        } catch (e: Throwable) {
-            BotLog.add("切游戏失败：" + e.javaClass.simpleName)
-        }
-    }
 
     private fun stopBot() {
         val intent = Intent(this, CaptureService::class.java).apply {
