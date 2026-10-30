@@ -16,6 +16,7 @@ _scratch/
 
 # ---- 打包产物 ----
 build/
+# dist/ 放 PC 的 exe 和安卓的 apk，都只在本地留着，不进仓库
 dist/
 *.apk
 *.aab
