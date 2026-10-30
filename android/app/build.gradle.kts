@@ -18,6 +18,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // 用调试签名：release 和 debug 的签名一致，才能直接覆盖装到已经装了
+            // 调试版的手机上。换个签名就得先卸载，而卸载会把无障碍授权、抓屏授权
+            // 和悬浮球位置一起清掉，纯粹给自己找麻烦。
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
