@@ -106,6 +106,20 @@ class MainActivity : Activity() {
         // 自检：注入的点击如果落回本 App 的「②」按钮，状态栏会变，不依赖任何别的 App
         button("⑦ 5 秒后点②（自检）") { armTap(5000L, 630, 321) }
         // 探针：切到游戏后进程会被回收，注入就发不出去。真机上的正式版也必须是这个形态。
+        button("⑨ 读点数（抓一帧识别）") {
+            val bmp = CaptureService.instance?.grabBitmap()
+            if (bmp == null) {
+                status.text = "识别：没拿到帧（先做①授权抓屏）"
+            } else {
+                val pts = CardReader.readPoints(bmp)
+                val size = "${bmp.width}x${bmp.height}"
+                bmp.recycle()
+                status.text = "识别 $size：" +
+                    pts.joinToString(" ") { if (it == 0) "-" else it.toString() } +
+                    "  合计 " + pts.sum()
+            }
+        }
+
         button("⑧ 保活（开前台服务，不抓屏）") {
             startForegroundService(Intent(this, CaptureService::class.java).apply {
                 action = CaptureService.ACTION_START
@@ -116,6 +130,7 @@ class MainActivity : Activity() {
         root.addView(status)
         root.addView(shizuku)
         setContentView(root)
+        CardReader.load(assets)
         refreshShizuku()
     }
 

@@ -106,19 +106,19 @@ class CaptureService : Service() {
         startAutoSave()
     }
 
-    /** 每 2 秒抓一帧存盘，只留最近 8 张：切到游戏后就不用再回来点按钮了。 */
+    /** 每秒抓一帧：存 PNG 留最近 8 张，同时识别点数写进 points.log。 */
     private fun startAutoSave() {
         if (worker != null) return
+        CardReader.load(assets)
         worker = Thread {
             while (reader != null) {
                 try {
-                    grabToDisk()
-                    prune()
+                    tick()
                 } catch (_: Throwable) {
                     // 探针：抓失败就等下一轮，不在这里报错
                 }
                 try {
-                    Thread.sleep(2000)
+                    Thread.sleep(1000)
                 } catch (_: InterruptedException) {
                     return@Thread
                 }
@@ -126,6 +126,31 @@ class CaptureService : Service() {
         }.apply {
             isDaemon = true
             start()
+        }
+    }
+
+    private fun tick() {
+        val imgReader = reader ?: return
+        val image: Image = try {
+            imgReader.acquireLatestImage()
+        } catch (e: IllegalStateException) {
+            return
+        } ?: return
+        val bmp = try {
+            toBitmap(image)
+        } finally {
+            image.close()
+        }
+        try {
+            val f = File(getExternalFilesDir(null), "frame-${System.currentTimeMillis()}.png")
+            f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            prune()
+            val pts = CardReader.readPoints(bmp)
+            val line = pts.joinToString(
+) + "  sum=" + pts.sum() + "\n"
+            File(getExternalFilesDir(null), "points.log").appendText(line)
+        } finally {
+            bmp.recycle()
         }
     }
 
@@ -141,6 +166,21 @@ class CaptureService : Service() {
         getExternalFilesDir(null)?.listFiles()
             ?.filter { it.name.endsWith(".png") }
             ?.maxByOrNull { it.lastModified() }
+
+    /** 抓最新一帧，直接给识别用。 */
+    fun grabBitmap(): Bitmap? {
+        val imgReader = reader ?: return null
+        val image: Image = try {
+            imgReader.acquireLatestImage()
+        } catch (e: IllegalStateException) {
+            null
+        } ?: return null
+        return try {
+            toBitmap(image)
+        } finally {
+            image.close()
+        }
+    }
 
     /** 抓最新一帧存进 App 专属外部目录（adb pull 能直接拿走，不用权限）。 */
     fun grabToDisk(): File? {
