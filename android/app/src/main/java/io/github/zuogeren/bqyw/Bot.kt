@@ -49,7 +49,8 @@ class Bot(
                 bmp.recycle()
                 val cp = Geom.tapConfirm()
                 engine.tap(cp.first, cp.second)
-                sleep(300)
+                // 点完确认牌会淡出，这时候读到的是上一手牌，直接当成一轮会误判命中
+                waitClear(2500)
                 continue
             }
 
@@ -57,7 +58,9 @@ class Bot(
             if (rnd == 0) {
                 bmp.recycle()
                 noRound++
-                if (noRound % 12 == 1) log("读不到轮次（" + Badge.lastInfo + "）")
+                // 刚换轮的瞬间徽章那块会白一下，第一次读空不刷日志，
+                // 否则悬浮球的状态栏每轮都要闪一次「读不到轮次」
+                if (noRound % 12 == 6) log("读不到轮次（" + Badge.lastInfo + "）")
                 if (noRound > 40) {
                     log("一直读不到轮次，停止")
                     return "no_round"

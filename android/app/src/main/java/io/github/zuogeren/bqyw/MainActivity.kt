@@ -30,14 +30,9 @@ class MainActivity : Activity() {
         override fun run() {
             val svc = CaptureService.instance
             val capture = if (svc?.hasProjection() == true) "就绪" else "未授权"
-            val shizuku = when {
-                !Shizuku.pingBinder() -> "未运行"
-                Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> "未授权"
-                ShizukuLink.ready() -> "已连接"
-                else -> "等连接"
-            }
+            val tap = if (Tap.ready()) Tap.current() else "无（② 或 ③ 开一个）"
             val bot = if (svc?.isBotRunning() == true) "运行中" else "空闲"
-            status.text = "抓屏：" + capture + "   Shizuku：" + shizuku + "   机器人：" + bot
+            status.text = "抓屏：" + capture + "   点按：" + tap + "   机器人：" + bot
             logView.text = BotLog.tail(12).joinToString("\n")
             handler.postDelayed(this, 600)
         }
@@ -67,7 +62,13 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "目标在悬浮球里设置：进游戏后点悬浮球 → 牌型 / 点数 → 开始"
             textSize = 14f
-            setPadding(0, 0, 0, (8 * resources.displayMetrics.density).toInt())
+            setPadding(0, 0, 0, dp(2))
+        })
+        root.addView(TextView(this).apply {
+            text = "点按方式：② 和 ③ 开一个就能用，同时开着用 ②"
+            textSize = 12f
+            setTextColor(0xFF666666.toInt())
+            setPadding(0, 0, 0, dp(8))
         })
 
         fun button(label: String, onClick: () -> Unit) {
@@ -78,10 +79,11 @@ class MainActivity : Activity() {
         }
 
         button("① 授权抓屏") { requestCapture() }
-        button("② 授权 Shizuku") { requestShizuku() }
-        button("③ 授权悬浮窗") { requestOverlay() }
-        button("④ 显示悬浮球") { showOverlay() }
-        button("⑤ 停止") { stopBot() }
+        button("② 无障碍点按") { openAccessibility() }
+        button("③ 授权 Shizuku") { requestShizuku() }
+        button("④ 授权悬浮窗") { requestOverlay() }
+        button("⑤ 显示悬浮球") { showOverlay() }
+        button("⑥ 停止") { stopBot() }
 
         root.addView(status)
         root.addView(logView)
@@ -89,6 +91,19 @@ class MainActivity : Activity() {
         // 边到边之后状态栏图标默认是白的，白底上看不见；要等窗口贴上装饰视图才能设
         window.decorView.post { lightStatusBar() }
         handler.post(poll)
+    }
+
+    private fun openAccessibility() {
+        if (TapService.isReady()) {
+            BotLog.add("无障碍点按已经可用，不用再开")
+            return
+        }
+        try {
+            startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            BotLog.add("在设置列表里找到「" + getString(R.string.app_name) + "」打开它")
+        } catch (e: Throwable) {
+            BotLog.add("打不开无障碍设置：" + e.javaClass.simpleName)
+        }
     }
 
     private fun requestOverlay() {

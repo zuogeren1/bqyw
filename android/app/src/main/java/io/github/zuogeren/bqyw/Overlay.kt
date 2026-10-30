@@ -375,14 +375,38 @@ class Overlay(private val ctx: Context) {
         mode = MODE_MAIN
         render()
         panel?.visibility = View.VISIBLE
+        fitOnScreen()
+    }
+
+    /**
+     * 展开后把整个面板挪回屏幕内。
+     *
+     * 要按面板的实测高度算，不能用固定值：主面板两百多 dp，格子页还要高一截，
+     * 用一个偏大的常量等于每次都把球硬拽到屏幕顶部（横屏只有 1260px 高）。
+     * 高度要等这一帧布局完才拿得准，所以 post 一下。
+     */
+    private fun fitOnScreen() {
         val p = params ?: return
-        // 面板比球大得多：夹一下位置，别让它跑出屏幕（横屏高度只有 1260px）
+        val container = root ?: return
         val dm = ctx.resources.displayMetrics
-        val maxX = dm.widthPixels - px(300)
-        val maxY = dm.heightPixels - px(330)
-        if (p.x > maxX) p.x = maxOf(0, maxX)
-        if (p.y > maxY) p.y = maxOf(0, maxY)
-        runCatching { wm.updateViewLayout(root, p) }
+        panel?.post {
+            val panelW = panel?.width ?: 0
+            val panelH = panel?.height ?: 0
+            if (panelW <= 0 || panelH <= 0) return@post
+            var moved = false
+            // 容器是横排：球 + 间距 + 面板
+            val maxX = dm.widthPixels - panelW - px(60)
+            val maxY = dm.heightPixels - panelH - px(4)
+            if (p.x > maxX) {
+                p.x = maxOf(0, maxX)
+                moved = true
+            }
+            if (p.y > maxY) {
+                p.y = maxOf(0, maxY)
+                moved = true
+            }
+            if (moved) runCatching { wm.updateViewLayout(container, p) }
+        }
     }
 
     private fun collapse() {

@@ -203,16 +203,17 @@ class CaptureService : Service() {
         botRunning = true
         BotLog.add("开始：目标 " + target + (if (maxAttempts > 0) "，重开上限 " + maxAttempts else ""))
         botThread = Thread {
-            var reason = "shizuku"
+            var reason = "no_tap"
             try {
-                // 绑定是异步的，主线程不能等，所以放在这里
+                // 无障碍是进程内的，可能已经就绪；Shizuku 是异步绑定，主线程不能等，所以放在这里
                 ShizukuLink.bind(packageName)
                 val end = System.currentTimeMillis() + 5000
-                while (!ShizukuLink.ready() && System.currentTimeMillis() < end) Thread.sleep(100)
-                if (!ShizukuLink.ready()) {
-                    BotLog.add("启动失败：" + shizukuWhy())
+                while (!Tap.ready() && System.currentTimeMillis() < end) Thread.sleep(100)
+                if (!Tap.ready()) {
+                    BotLog.add("启动失败：" + tapWhy())
                     return@Thread
                 }
+                BotLog.add("点按方式：" + Tap.current())
                 reason = Bot(engine, target, maxAttempts) { BotLog.add(it) }.run()
             } catch (e: Throwable) {
                 BotLog.add("运行出错：" + e.javaClass.simpleName + " " + (e.message ?: ""))
@@ -227,11 +228,14 @@ class CaptureService : Service() {
         }
     }
 
-    private fun shizukuWhy(): String = when {
-        !rikka.shizuku.Shizuku.pingBinder() -> "Shizuku 服务没在运行"
+    /** 两种点按方式都不可用时，说清楚各自缺什么。 */
+    private fun tapWhy(): String = when {
+        !rikka.shizuku.Shizuku.pingBinder() ->
+            "无障碍没开，Shizuku 服务也没在运行（打开其中任意一个即可）"
         rikka.shizuku.Shizuku.checkSelfPermission() !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED -> "还没给本应用授权 Shizuku"
-        else -> "用户服务连接超时（Shizuku 可能刚重启，再点一次开始）"
+            android.content.pm.PackageManager.PERMISSION_GRANTED ->
+            "无障碍没开，Shizuku 也还没授权给本应用（打开其中任意一个即可）"
+        else -> "无障碍没开，Shizuku 用户服务连接超时（再点一次开始，或改用无障碍）"
     }
 
     private fun stopBot() {
@@ -248,14 +252,14 @@ class CaptureService : Service() {
         "stuck" -> "牌桌一直是空的"
         "noframe" -> "没有画面"
         "no_round" -> "读不到轮次"
-        "shizuku" -> "Shizuku 没连上"
+        "no_tap" -> "没有可用的点按方式"
         else -> reason
     }
 
     private val engine = object : Bot.Engine {
         override fun frame(): Bitmap? = grabBitmap()
 
-        override fun tap(x: Int, y: Int): Boolean = ShizukuLink.tap(x, y)
+        override fun tap(x: Int, y: Int): Boolean = Tap.tap(x, y)
 
         override fun beep() {
             try {
