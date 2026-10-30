@@ -18,9 +18,12 @@ import android.widget.TextView
 /**
  * 悬浮球：游戏里也能操作的主界面。
  *
- * 收起时只有一个小球，拖动可以换位置，点一下展开面板：
- * 五个点数格（点一下 任意→1→2→3→4→5 循环）、开始、停止、状态。
- * 故意不放输入框——悬浮窗里弹输入法很别扭，够用的组合用格子就够了。
+ * 收起只有一个小球，拖动移动、点一下展开。面板里：
+ *  - 牌型（下拉）：不限 / 散牌 / 对子 / … / 同花顺，选了就按牌型判定
+ *  - 点数（下拉）：5 个格子，每个可选 任意 / 1~5 / 1~5 带花色
+ *  - 开始 / 停止 / 状态
+ *
+ * 全部用面板内展开的选项网格，不弹系统下拉框——悬浮窗里弹窗容易抢焦点。
  */
 class Overlay(private val ctx: Context) {
 
@@ -30,27 +33,27 @@ class Overlay(private val ctx: Context) {
     private var root: LinearLayout? = null
     private var params: WindowManager.LayoutParams? = null
     private var panel: LinearLayout? = null
-    private lateinit var chips: Array<TextView>
-    private var status: TextView? = null
+    private var body: LinearLayout? = null
     private var expanded = false
 
-    private val points = intArrayOf(5, 5, 5, 5, 0)
-    private var handIndex = 0
-    private lateinit var handChip: TextView
+    private val point = intArrayOf(3, 2, 5, 0, 0)
+    private val suit = intArrayOf(0, 0, 0, 0, 0)
+    private var handIdx = 0
+    private val handOptions: List<Hand?> = listOf(null) + Hand.values().toList()
 
-    private val handCycle: List<Hand?> = listOf(
-        null, Hand.PAIR, Hand.TWO_PAIR, Hand.TRIPS, Hand.STRAIGHT,
-        Hand.FLUSH, Hand.FULL_HOUSE, Hand.QUADS, Hand.STRAIGHT_FLUSH,
-    )
+    private var mode = MODE_MAIN
+    private var slotIdx = 0
+    private var status: TextView? = null
 
     private val dp: Float get() = ctx.resources.displayMetrics.density
-
     private fun px(v: Int): Int = (v * dp).toInt()
 
     val isShowing: Boolean get() = root != null
 
+    // ------------------------------------------------------------ 组装
     fun show() {
         if (root != null) return
+
         val ball = TextView(ctx).apply {
             text = "抽"
             setTextColor(Color.WHITE)
@@ -64,6 +67,8 @@ class Overlay(private val ctx: Context) {
             layoutParams = LinearLayout.LayoutParams(px(52), px(52))
         }
 
+        body = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+
         panel = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(px(10), px(8), px(10), px(8))
@@ -73,92 +78,10 @@ class Overlay(private val ctx: Context) {
                 setStroke(px(1), Color.parseColor("#55FFFFFF"))
             }
             visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-            ).apply { marginStart = px(8) }
+            layoutParams = LinearLayout.LayoutParams(px(250), LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { marginStart = px(8) }
+            addView(body)
         }
-
-        panel!!.addView(TextView(ctx).apply {
-            text = "目标点数（点格子切换）"
-            setTextColor(Color.parseColor("#AAFFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-        })
-
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, px(4), 0, px(4))
-        }
-        chips = Array(5) { i ->
-            TextView(ctx).apply {
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                gravity = Gravity.CENTER
-                background = GradientDrawable().apply {
-                    cornerRadius = px(6).toFloat()
-                    setColor(Color.parseColor("#33FFFFFF"))
-                }
-                layoutParams = LinearLayout.LayoutParams(px(34), px(34)).apply {
-                    marginEnd = px(4)
-                }
-                setOnClickListener {
-                    points[i] = (points[i] + 1) % 6
-                    renderChips()
-                }
-            }.also { row.addView(it) }
-        }
-        panel!!.addView(row)
-
-        val handRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, px(6))
-        }
-        handChip = TextView(ctx).apply {
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(px(10), px(5), px(10), px(5))
-            background = GradientDrawable().apply {
-                cornerRadius = px(6).toFloat()
-                setColor(Color.parseColor("#33FFFFFF"))
-            }
-            setOnClickListener {
-                handIndex = (handIndex + 1) % handCycle.size
-                renderHand()
-            }
-        }
-        handRow.addView(handChip)
-        panel!!.addView(handRow)
-
-        val buttons = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        buttons.addView(TextView(ctx).apply {
-            text = "开始"
-            setTextColor(Color.parseColor("#FF19C37D"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            gravity = Gravity.CENTER
-            setPadding(px(12), px(6), px(12), px(6))
-            setOnClickListener { start() }
-        })
-        buttons.addView(TextView(ctx).apply {
-            text = "停止"
-            setTextColor(Color.parseColor("#FFE05B5B"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            gravity = Gravity.CENTER
-            setPadding(px(12), px(6), px(12), px(6))
-            setOnClickListener { CaptureService.instance?.stopBotFromUi() }
-        })
-        panel!!.addView(buttons)
-
-        status = TextView(ctx).apply {
-            setTextColor(Color.parseColor("#99FFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setPadding(0, px(4), 0, 0)
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            layoutParams = LinearLayout.LayoutParams(px(236), LinearLayout.LayoutParams.WRAP_CONTENT)
-        }
-        panel!!.addView(status)
 
         val container = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -185,8 +108,7 @@ class Overlay(private val ctx: Context) {
         params = p
         wm.addView(container, p)
         attachDrag(ball)
-        renderChips()
-        renderHand()
+        render()
         handler.post(poll)
     }
 
@@ -195,25 +117,180 @@ class Overlay(private val ctx: Context) {
         root?.let { runCatching { wm.removeView(it) } }
         root = null
         panel = null
+        body = null
         status = null
     }
 
-    private fun renderChips() {
-        chips.forEachIndexed { i, v ->
-            v.text = if (points[i] == 0) "任" else points[i].toString()
-            (v.background as? GradientDrawable)?.setColor(
-                if (points[i] == 0) Color.parseColor("#22FFFFFF") else Color.parseColor("#55FFFFFF")
-            )
+    // ------------------------------------------------------------ 渲染
+    private fun render() {
+        val b = body ?: return
+        b.removeAllViews()
+        when (mode) {
+            MODE_HAND -> renderHandList(b)
+            MODE_SLOT -> renderSlotList(b)
+            else -> renderMain(b)
         }
     }
 
-    private fun renderHand() {
-        val h = handCycle[handIndex]
-        handChip.text = "牌型：" + (h?.cn ?: "不要")
+    private fun renderMain(b: LinearLayout) {
+        b.addView(label("牌型"))
+        b.addView(button(handText(), wide = true) {
+            mode = MODE_HAND
+            render()
+        })
+
+        b.addView(label("目标点数（每格可选花色）"))
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, px(2))
+        }
+        for (i in 0 until 5) {
+            val cell = button(slotText(i), wide = false) {
+                slotIdx = i
+                mode = MODE_SLOT
+                render()
+            }
+            cell.layoutParams = LinearLayout.LayoutParams(px(40), px(36)).apply { marginEnd = px(4) }
+            cell.alpha = if (handOptions[handIdx] != null) 0.35f else 1f
+            row.addView(cell)
+        }
+        b.addView(row)
+
+        val hint = TextView(ctx).apply {
+            setTextColor(Color.parseColor("#FFFFC857"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(0, 0, 0, px(4))
+            text = if (handOptions[handIdx] != null) "已按牌型判定，上面这行不生效" else " "
+        }
+        b.addView(hint)
+
+        val actions = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(button("开始", wide = false) { start() }.apply {
+            layoutParams = LinearLayout.LayoutParams(px(58), px(36)).apply { marginEnd = px(6) }
+        })
+        actions.addView(button("停止", wide = false) {
+            CaptureService.instance?.stopBotFromUi()
+        }.apply { layoutParams = LinearLayout.LayoutParams(px(58), px(36)) })
+        b.addView(actions)
+
+        status = TextView(ctx).apply {
+            setTextColor(Color.parseColor("#99FFFFFF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setPadding(0, px(6), 0, 0)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        b.addView(status)
     }
 
+    private fun renderHandList(b: LinearLayout) {
+        b.addView(label("选择牌型"))
+        grid(b, handOptions.map { it?.cn ?: "不限" }, 2, 92) { idx ->
+            handIdx = idx
+            mode = MODE_MAIN
+            render()
+        }
+        b.addView(button("返回", wide = true) {
+            mode = MODE_MAIN
+            render()
+        })
+    }
+
+    private fun renderSlotList(b: LinearLayout) {
+        b.addView(label("第 " + (slotIdx + 1) + " 张"))
+        grid(b, slotOptionLabels(), 4, 56) { idx ->
+            val p = SLOT_POINTS[idx]
+            val s = SLOT_SUITS[idx]
+            point[slotIdx] = p
+            suit[slotIdx] = s
+            mode = MODE_MAIN
+            render()
+        }
+        b.addView(button("返回", wide = true) {
+            mode = MODE_MAIN
+            render()
+        })
+    }
+
+    private fun grid(
+        parent: LinearLayout,
+        items: List<String>,
+        cols: Int,
+        cellW: Int = 56,
+        onPick: (Int) -> Unit,
+    ) {
+        var row: LinearLayout? = null
+        items.forEachIndexed { i, text ->
+            if (i % cols == 0) {
+                row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+                parent.addView(row)
+            }
+            val cell = button(text, wide = false) { onPick(i) }
+            cell.layoutParams = LinearLayout.LayoutParams(px(cellW), px(32)).apply {
+                marginEnd = px(4)
+                topMargin = px(3)
+            }
+            row?.addView(cell)
+        }
+    }
+
+    private fun label(text: String): TextView = TextView(ctx).apply {
+        this.text = text
+        setTextColor(Color.parseColor("#AAFFFFFF"))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        setPadding(0, px(2), 0, px(3))
+    }
+
+    private fun button(text: String, wide: Boolean, onClick: () -> Unit): TextView =
+        TextView(ctx).apply {
+            this.text = text
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
+            setPadding(px(8), px(4), px(8), px(4))
+            background = GradientDrawable().apply {
+                cornerRadius = px(6).toFloat()
+                setColor(Color.parseColor("#33FFFFFF"))
+            }
+            layoutParams = if (wide) {
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, px(34),
+                ).apply { topMargin = px(2) }
+            } else {
+                LinearLayout.LayoutParams(px(56), px(32))
+            }
+            setOnClickListener { onClick() }
+        }
+
+    // ------------------------------------------------------------ 选项
+    private fun slotText(i: Int): String {
+        val p = point[i]
+        if (p == 0) return "任"
+        return if (suit[i] == 0) p.toString() else p.toString() + Target.SUIT_CN[suit[i]]
+    }
+
+    private fun handText(): String = handOptions[handIdx]?.cn ?: "不限"
+
+    private fun slotOptionLabels(): List<String> =
+        SLOT_POINTS.indices.map { idx ->
+            val p = SLOT_POINTS[idx]
+            val s = SLOT_SUITS[idx]
+            when {
+                p == 0 -> "任"
+                s == 0 -> p.toString()
+                else -> p.toString() + Target.SUIT_CN[s]
+            }
+        }
+
     private fun targetSpec(): String =
-        points.joinToString(" ") { if (it == 0) "任意" else it.toString() }
+        (0 until 5).joinToString(" ") { i ->
+            val p = point[i]
+            when {
+                p == 0 -> "任意"
+                suit[i] == 0 -> p.toString()
+                else -> p.toString() + Target.SUIT_CN[suit[i]]
+            }
+        }
 
     private fun start() {
         val svc = CaptureService.instance
@@ -221,10 +298,11 @@ class Overlay(private val ctx: Context) {
             BotLog.add("服务没在跑，先回 App 授权抓屏")
             return
         }
-        svc.startBotFromUi(targetSpec(), 0, handCycle[handIndex]?.name)
+        svc.startBotFromUi(targetSpec(), 0, handOptions[handIdx]?.name)
         collapse()
     }
 
+    // ------------------------------------------------------------ 拖动
     private fun attachDrag(ball: View) {
         var downX = 0f
         var downY = 0f
@@ -249,9 +327,7 @@ class Overlay(private val ctx: Context) {
                     p.y = startY + dy.toInt()
                     runCatching { wm.updateViewLayout(root, p) }
                 }
-                MotionEvent.ACTION_UP -> {
-                    if (!moved) toggle()
-                }
+                MotionEvent.ACTION_UP -> if (!moved) toggle()
             }
             true
         }
@@ -263,9 +339,10 @@ class Overlay(private val ctx: Context) {
 
     private fun expand() {
         expanded = true
+        mode = MODE_MAIN
+        render()
         panel?.visibility = View.VISIBLE
         val p = params ?: return
-        // 展开后往左收，别挡住右边的按钮
         val maxX = ctx.resources.displayMetrics.widthPixels
         if (p.x > maxX / 3) p.x = maxX / 3
         runCatching { wm.updateViewLayout(root, p) }
@@ -285,5 +362,14 @@ class Overlay(private val ctx: Context) {
             status?.text = (if (running) "运行中  " else "空闲  ") + last
             handler.postDelayed(this, 700)
         }
+    }
+
+    private companion object {
+        const val MODE_MAIN = 0
+        const val MODE_HAND = 1
+        const val MODE_SLOT = 2
+
+        val SLOT_POINTS = intArrayOf(0, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5)
+        val SLOT_SUITS = intArrayOf(0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3)
     }
 }

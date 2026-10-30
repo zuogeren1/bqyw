@@ -1,23 +1,26 @@
 package io.github.zuogeren.bqyw
 
 /**
- * 目标：要么按「点数组合」（0 表示任意），要么按「牌型」。
- * 两者同时给的时候，牌型优先（牌型判定本身已经含点数关系）。
+ * 目标：要么按「牌型」，要么按「点数组合」（可以带花色）。
+ * 选了牌型就按牌型判定，点数那组直接忽略。
  */
-class Target(val points: List<Int>, val hand: Hand? = null) {
+class Target(val wants: List<Card>, val hand: Hand? = null) {
 
     fun matches(cards: List<Card>): Boolean {
         if (hand != null) return Hands.best(cards) == hand
-        if (cards.size < points.size) return false
-        return fit(points.toMutableList(), cards.take(points.size).map { it.point })
+        if (cards.size < wants.size) return false
+        return fit(wants.toMutableList(), cards.take(wants.size))
     }
 
-    private fun fit(left: MutableList<Int>, cards: List<Int>): Boolean {
+    private fun fit(left: MutableList<Card>, cards: List<Card>): Boolean {
         if (left.isEmpty()) return cards.isEmpty()
         if (cards.isEmpty()) return false
         val c = cards[0]
         for (i in left.indices) {
-            if (left[i] == 0 || left[i] == c) {
+            val w = left[i]
+            val pointOk = w.point == 0 || w.point == c.point
+            val suitOk = w.suit == 0 || w.suit == c.suit
+            if (pointOk && suitOk) {
                 val rest = ArrayList(left)
                 rest.removeAt(i)
                 if (fit(rest, cards.subList(1, cards.size))) return true
@@ -28,26 +31,40 @@ class Target(val points: List<Int>, val hand: Hand? = null) {
 
     override fun toString(): String {
         if (hand != null) return hand.cn
-        return points.joinToString(" ") { if (it == 0) "任意" else it.toString() }
+        return wants.joinToString(" ") { w ->
+            when {
+                w.point == 0 -> "任意"
+                w.suit == 0 -> w.point.toString()
+                else -> w.point.toString() + SUIT_CN[w.suit]
+            }
+        }
+    }
+
+    companion object {
+        val SUIT_CN = arrayOf("", "萬", "筒", "索")
     }
 }
 
 object Targets {
 
-    /** 解析 "5 5 5 5 任意" 这种写法。 */
+    /** 解析 "3筒 2 5 任 任" 这种写法：不写花色就是不限。 */
     fun parse(spec: String): Target {
         val raw = spec.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         require(raw.isNotEmpty()) { "目标不能为空" }
-        val pts = raw.map { tok ->
-            when (tok) {
-                "任意", "?", "any" -> 0
-                else -> {
-                    val v = tok.toIntOrNull()
-                    require(v != null && v in 1..5) { "看不懂的点数：" + tok }
-                    v
-                }
-            }
+        return Target(raw.map { card(it) })
+    }
+
+    private fun card(tok: String): Card {
+        if (tok == "任意" || tok == "任" || tok == "?" || tok == "any") return Card(0, 0)
+        val m = Regex("^([1-5])([萬筒索]?)$").find(tok)
+            ?: throw IllegalArgumentException("看不懂：" + tok)
+        val p = m.groupValues[1].toInt()
+        val s = when (m.groupValues[2]) {
+            "萬" -> 1
+            "筒" -> 2
+            "索" -> 3
+            else -> 0
         }
-        return Target(pts)
+        return Card(p, s)
     }
 }

@@ -52,6 +52,9 @@ class CaptureService : Service() {
 
     private var overlay: Overlay? = null
 
+    /** 前台服务类型只许加不许减：把 mediaProjection 从已有会话里摘掉，系统会顺手停掉投屏。 */
+    private var fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+
     private var botThread: Thread? = null
     @Volatile private var botStop = false
     @Volatile private var botRunning = false
@@ -124,13 +127,12 @@ class CaptureService : Service() {
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= 29) {
-            val type = if (capturing) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            } else {
+        if (capturing) {
+            fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            }
-            startForeground(1, note, type)
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(1, note, fgsType)
         } else {
             startForeground(1, note)
         }
@@ -176,7 +178,7 @@ class CaptureService : Service() {
         val hand = handName?.takeIf { it.isNotBlank() }
             ?.let { n -> Hand.values().firstOrNull { it.name == n } }
         val target = try {
-            Target(Targets.parse(spec).points, hand)
+            Target(Targets.parse(spec).wants, hand)
         } catch (e: Throwable) {
             BotLog.add("目标写法不对：" + (e.message ?: ""))
             return
