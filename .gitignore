@@ -17,6 +17,13 @@ _scratch/
 # ---- 打包产物 ----
 build/
 dist/
+*.apk
+*.aab
+
+# ---- Android 工程 ----
+android/.gradle/
+android/.kotlin/
+android/local.properties
 
 # ---- 本地笔记（不进仓库） ----
 .notes/
