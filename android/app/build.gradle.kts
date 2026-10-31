@@ -11,9 +11,14 @@ android {
         applicationId = "io.github.zuogeren.bqyw"
         minSdk = 29
         targetSdk = 36
-        // 版本号跟 PC 版保持一致：1.1.1 -> 111
-        versionCode = 111
-        versionName = "1.1.1"
+        // 版本号跟 PC 版保持一致：1.1.3 -> 112
+        versionCode = 112
+        versionName = "1.1.3"
+    }
+
+    // 启动头要打版本号（BuildConfig.VERSION_NAME），别让它和 versionName 各写一份
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

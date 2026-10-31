@@ -95,20 +95,23 @@ class MainActivity : Activity() {
 
     private fun openAccessibility() {
         if (TapService.isReady()) {
-            BotLog.add("无障碍点按已经可用，不用再开")
+            BotLog.add("授权：无障碍服务 " + Auth.a11y() + "，不用再开")
             return
         }
         try {
             startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            BotLog.add("在设置列表里找到「" + getString(R.string.app_name) + "」打开它")
+            BotLog.add(
+                "授权：无障碍服务 " + Auth.a11y() +
+                    "，去设置列表里找到「" + getString(R.string.app_name) + "」打开它",
+            )
         } catch (e: Throwable) {
-            BotLog.add("打不开无障碍设置：" + e.javaClass.simpleName)
+            BotLog.add("[!] 打不开无障碍设置：" + e.javaClass.simpleName)
         }
     }
 
     private fun requestOverlay() {
         if (android.provider.Settings.canDrawOverlays(this)) {
-            BotLog.add("悬浮窗权限已经有了")
+            BotLog.add("授权：悬浮窗 " + Auth.overlay(this) + "，不用再开")
             showOverlay()
             return
         }
@@ -119,15 +122,15 @@ class MainActivity : Activity() {
                     android.net.Uri.parse("package:" + packageName),
                 )
             )
-            BotLog.add("去设置里打开「显示在其他应用上层」")
+            BotLog.add("授权：悬浮窗 未允许，去设置里打开「显示在其他应用上层」")
         } catch (e: Throwable) {
-            BotLog.add("打不开悬浮窗设置：" + e.javaClass.simpleName)
+            BotLog.add("[!] 打不开悬浮窗设置：" + e.javaClass.simpleName)
         }
     }
 
     private fun showOverlay() {
         if (!android.provider.Settings.canDrawOverlays(this)) {
-            BotLog.add("还没给悬浮窗权限")
+            BotLog.add("授权：悬浮窗 " + Auth.overlay(this))
             return
         }
         val intent = Intent(this, CaptureService::class.java).apply {
@@ -173,14 +176,14 @@ class MainActivity : Activity() {
 
     private fun requestShizuku() {
         if (!Shizuku.pingBinder()) {
-            BotLog.add("Shizuku 服务没在运行")
+            BotLog.add("授权：Shizuku " + Auth.shizuku())
             return
         }
         if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
             ShizukuLink.bind(packageName)
-            BotLog.add("Shizuku 已授权，正在连接用户服务")
+            BotLog.add("授权：Shizuku 已授权，正在连接用户服务")
         } else {
-            BotLog.add("向 Shizuku 申请授权")
+            BotLog.add("授权：Shizuku 未授权，正在申请")
             Shizuku.requestPermission(REQ_SHIZUKU)
         }
     }
@@ -192,7 +195,7 @@ class MainActivity : Activity() {
             action = CaptureService.ACTION_STOP_BOT
         }
         startForegroundService(intent)
-        BotLog.add("下发停止指令")
+        BotLog.add("停止：下发停止指令")
     }
 
     override fun onRequestPermissionsResult(
@@ -204,7 +207,7 @@ class MainActivity : Activity() {
         if (requestCode == REQ_SHIZUKU) {
             val ok = grantResults.isNotEmpty() &&
                 grantResults[0] == PackageManager.PERMISSION_GRANTED
-            BotLog.add(if (ok) "Shizuku 授权成功" else "Shizuku 授权被拒绝")
+            BotLog.add("授权：Shizuku " + (if (ok) "已授权" else "未授权（被拒绝）"))
             if (ok) ShizukuLink.bind(packageName)
         }
     }
@@ -213,7 +216,7 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQ_CAPTURE) return
         if (resultCode != RESULT_OK || data == null) {
-            BotLog.add("取消了抓屏授权")
+            BotLog.add("授权：抓屏（MediaProjection） 已取消")
             return
         }
         val intent = Intent(this, CaptureService::class.java).apply {
@@ -222,7 +225,7 @@ class MainActivity : Activity() {
             putExtra(CaptureService.EXTRA_DATA, data)
         }
         startForegroundService(intent)
-        BotLog.add("抓屏授权成功")
+        BotLog.add("授权：抓屏（MediaProjection） 已授权")
     }
 
     override fun onDestroy() {

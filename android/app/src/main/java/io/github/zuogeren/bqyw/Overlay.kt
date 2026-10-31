@@ -433,11 +433,11 @@ class Overlay(private val ctx: Context) {
     private fun start() {
         val svc = CaptureService.instance
         if (svc == null) {
-            BotLog.add("服务没在跑，先回 App 授权抓屏")
+            BotLog.add("[!] 服务没在跑，先回 App 授权抓屏")
             return
         }
         if (handSel.isEmpty() && (!customOn || groups.isEmpty())) {
-            BotLog.add("还没选目标：点开「选择牌型 / 自定义」勾一个")
+            BotLog.add("[!] 还没选目标：点开「选择牌型 / 自定义」勾一个")
             return
         }
         svc.startBotFromUi(specs(), handNames(), ordered, fast)

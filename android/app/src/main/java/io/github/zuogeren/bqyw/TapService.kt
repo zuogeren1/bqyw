@@ -23,7 +23,7 @@ class TapService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         attach(this)
-        BotLog.add("无障碍点按已连接")
+        BotLog.add("授权：无障碍服务 已开启")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -34,7 +34,7 @@ class TapService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         detach()
-        BotLog.add("无障碍点按已断开")
+        BotLog.add("授权：无障碍服务 已关闭")
         return super.onUnbind(intent)
     }
 

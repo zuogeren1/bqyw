@@ -19,6 +19,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import java.io.File
+import java.util.Locale
 
 /**
  * 主服务：前台服务 + MediaProjection 抓屏 + 跑抽牌状态机。
@@ -86,7 +87,7 @@ class CaptureService : Service() {
         try {
             overlay = Overlay(this).also { it.show() }
         } catch (e: Throwable) {
-            BotLog.add("悬浮球开不起来：" + e.javaClass.simpleName)
+            BotLog.add("[!] 悬浮球开不起来：" + e.javaClass.simpleName)
         }
     }
 
@@ -193,22 +194,22 @@ class CaptureService : Service() {
         fast: Boolean = false,
     ) {
         if (reader == null) {
-            BotLog.add("还没授权抓屏，先在 App 里点「授权抓屏」")
+            BotLog.add("[!] 还没授权抓屏，先在 App 里点「授权抓屏」")
             return
         }
         if (botRunning) {
-            BotLog.add("已经在跑了")
+            BotLog.add("[!] 已经在跑了")
             return
         }
         // 单个目标还是单个 Target，多选才包成 MultiTarget，组装规则和悬浮球的摘要一致
         val target = try {
             Targets.combine(handNames, specs, ordered)
         } catch (e: Throwable) {
-            BotLog.add("目标写法不对：" + (e.message ?: ""))
+            BotLog.add("[!] 目标写法不对：" + (e.message ?: ""))
             return
         }
         if (target == null) {
-            BotLog.add("还没选目标：点悬浮球 → 牌型，勾一个再开始")
+            BotLog.add("[!] 还没选目标：点悬浮球 → 牌型，勾一个再开始")
             return
         }
 
@@ -217,33 +218,51 @@ class CaptureService : Service() {
             maxOf(dm.widthPixels, dm.heightPixels),
             minOf(dm.widthPixels, dm.heightPixels),
         )
+        // 画面尺寸写实际抓屏帧的，坐标缩放就是 Geom / Fit 正在用的那个
+        val capW = reader?.width ?: 0
+        val capH = reader?.height ?: 0
 
         botStop = false
         botRunning = true
+        // 启动头 + 开跑三行，和 PC 版日志开头同一个写法
+        BotLog.header(this, capW, capH)
         BotLog.add(
-            "开始：目标 " + target +
-                (if (fast) "，快速模式" else "") +
-                (if (maxAttempts > 0) "，重开上限 " + maxAttempts else ""),
+            "── 开始：" + target +
+                "  重开上限=" + (if (maxAttempts > 0) maxAttempts.toString() else "不限") +
+                (if (fast) "  快速模式" else ""),
+        )
+        BotLog.add("目标：" + target)
+        BotLog.add("抓取源：屏幕镜像" + (if (fast) "（快速模式：连抽 5 张）" else ""))
+        BotLog.add(
+            "画面 " + capW + "×" + capH + "（" + BotLog.aspect(capW, capH) +
+                "），坐标缩放 " + String.format(Locale.US, "%.3f", Fit(capW, capH).s),
         )
         botThread = Thread {
-            var reason = "no_tap"
+            var reason = "aborted"
+            var bot: Bot? = null
             try {
                 // 无障碍是进程内的，可能已经就绪；Shizuku 是异步绑定，主线程不能等，所以放在这里
                 ShizukuLink.bind(packageName)
                 val end = System.currentTimeMillis() + 5000
                 while (!Tap.ready() && System.currentTimeMillis() < end) Thread.sleep(100)
+                Auth.log(this)
                 if (!Tap.ready()) {
-                    BotLog.add("启动失败：" + tapWhy())
+                    BotLog.add("   [!] " + tapWhy())
                     return@Thread
                 }
                 BotLog.add("点按方式：" + Tap.current())
-                reason = Bot(engine, target, maxAttempts, fast) { BotLog.add(it) }.run()
+                bot = Bot(engine, target, maxAttempts, fast) { BotLog.add(it) }
+                reason = bot.run()
             } catch (e: Throwable) {
-                BotLog.add("运行出错：" + e.javaClass.simpleName + " " + (e.message ?: ""))
+                BotLog.add("   [!] 异常：" + e.javaClass.simpleName + " " + (e.message ?: ""))
+                reason = "error"
             } finally {
                 botRunning = false
                 botThread = null
-                BotLog.add("结束（" + reasonLabel(reason) + "）")
+                BotLog.add(
+                    "── 结束（" + reasonCode(reason) + "）" +
+                        (if (bot != null) "  " + bot.summary() else ""),
+                )
             }
         }.apply {
             isDaemon = true
@@ -264,20 +283,20 @@ class CaptureService : Service() {
     private fun stopBot() {
         if (!botRunning) return
         botStop = true
-        BotLog.add("收到停止指令")
+        BotLog.add("停止：收到停止指令")
     }
 
-    private fun reasonLabel(reason: String): String = when (reason) {
-        "hit" -> "命中"
-        "max" -> "达到重开上限"
-        "stopped" -> "已停止"
-        "round2" -> "不是第 1 轮"
-        "stuck" -> "牌桌一直是空的"
-        "stuck_draw" -> "抽牌一直没反应"
-        "noframe" -> "没有画面"
-        "no_round" -> "读不到轮次"
-        "no_tap" -> "没有可用的点按方式"
-        else -> reason
+    /** 结束原因，和 PC 版同一个词表。 */
+    private fun reasonCode(reason: String): String = when (reason) {
+        "hit" -> "hit"
+        "stopped" -> "stopped"
+        "max" -> "max_attempts"
+        "round2" -> "round2"
+        "no_round" -> "round_unknown"
+        "noframe" -> "bad_frame"
+        "error" -> "error"
+        // no_tap / stuck / stuck_draw：都是「没法继续」，归到 aborted
+        else -> "aborted"
     }
 
     private val engine = object : Bot.Engine {
