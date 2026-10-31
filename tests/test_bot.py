@@ -2,8 +2,8 @@
 """主循环记账自检：python tests/test_bot.py
 
 不开窗口、不点鼠标：把抓屏 / 模板 / 点击全部换成假的，只跑 Bot._run 的状态机，
-专测「轮数」这类记账。快速模式曾经在这里出过 bug —— 放弃后立刻连点，新牌在
-下一帧就铺满了，主循环再也等不到空牌桌，于是跑了一小时还显示「1 轮」。
+专测「轮数」这类记账：放弃后牌桌清空、主循环靠 n == 0 记账，
+一轮只该记一次，跑一小时不能变成「1 轮」或者翻倍。
 """
 import os
 import sys
@@ -28,7 +28,6 @@ def check(name, got, want):
 # 一手永远打不中「5 5 5 5 5」的牌
 MISS = [Card(1, SUIT_TONG), Card(2, SUIT_SUO), Card(3, SUIT_WAN),
         Card(4, SUIT_TONG), Card(5, SUIT_SUO)]
-HIT = [Card(5, SUIT_SUO)] * 5
 
 
 class FakeCap:
@@ -86,7 +85,6 @@ class Table:
         self.hands = [list(h) for h in hands]
         self.draw_script = list(draws or [])     # 单抽时按顺序发的牌
         self.forfeits = 0
-        self.bursts = 0
         self.draws = 0
 
     def next_hand(self):
@@ -100,11 +98,10 @@ class Table:
         return self.next_hand()[len(self.cards) % 5]
 
 
-def make_bot(table, *, fast=True, max_attempts=0, stub_burst=True,
-             target="5 5 5 5 5", dry_run=True):
+def make_bot(table, *, max_attempts=0, target="5 5 5 5 5", dry_run=True):
     logs = []
     b = B.Bot(capture=FakeCap(), target=CustomTarget.parse(target),
-              fast_mode=fast, dry_run=dry_run, max_attempts=max_attempts,
+              dry_run=dry_run, max_attempts=max_attempts,
               verbose=False, logger=logs.append)
     b.hotkey = ""                 # 别去注册真的全局热键
     b.keep_console = True         # 别把测试的控制台最小化
@@ -113,7 +110,7 @@ def make_bot(table, *, fast=True, max_attempts=0, stub_burst=True,
     b.read_state = lambda expect=None, tries=4, gap=0.03: (None, list(table.cards))
     b.act = lambda box, what: None
 
-    def fake_forfeit(timeout=1.5, wait_clear=True):
+    def fake_forfeit(timeout=1.5):
         table.forfeits += 1
         if table.forfeits > 200:
             raise AssertionError("放弃次数失控，主循环没在记账")
@@ -121,15 +118,6 @@ def make_bot(table, *, fast=True, max_attempts=0, stub_burst=True,
         return True
 
     b.forfeit = fake_forfeit
-
-    if stub_burst:
-        def fake_burst(seconds=6.0, want=5):
-            table.bursts += 1
-            if table.bursts > 200:
-                raise AssertionError("连点次数失控")
-            table.cards = list(table.next_hand())
-            return list(table.cards)
-        b.draw_burst = fake_burst
 
     def fake_draw(before, window=6.0):
         table.draws += 1
@@ -158,29 +146,11 @@ def main():
         check("到上限返回 False", b.new_round(), False)
         check("到上限不记账", b.stats.attempts, 1)
 
-        # -------------------------------- 快速模式：跑满上限就停（曾经停不下来）
-        t1 = Table([MISS])
-        b1, logs1 = make_bot(t1, max_attempts=3)
-        reason = b1._run()
-        check("快速模式 停因", reason, "max_attempts")
-        check("快速模式 轮数", b1.stats.attempts, 3)
-        check("快速模式 每轮都打轮数", len([x for x in logs1 if "轮]" in x]), 3)
-        check("快速模式 连点次数", t1.bursts, 3)
-        check("快速模式 放弃次数", t1.forfeits, 3)
-        check("快速模式 摘要里的轮数", "3 轮" in b1.pace(), True)
-
-        # ------------------------------------------ 快速模式：命中那一轮也要算
-        t2 = Table([MISS, MISS, HIT])
-        b2, _ = make_bot(t2)
-        check("快速模式 命中停因", b2._run(), "hit")
-        check("快速模式 命中轮数", b2.stats.attempts, 3)
-        check("快速模式 命中放弃次数", t2.forfeits, 2)
-
-        # -------------------------------------- 普通模式不能被这次改动带坏
+        # -------------------- 跑满上限就停：一轮只记一次账，别越跑越"多"
         # 目标「5 5 5 5 5」第一张就凑不上，会走「提前放弃」那条路：
         # 放弃后牌桌清空，主循环靠 n == 0 记账，同样一轮只该记一次。
         t3 = Table([MISS])
-        b3, logs3 = make_bot(t3, fast=False, max_attempts=3)
+        b3, logs3 = make_bot(t3, max_attempts=3)
         check("普通模式 停因", b3._run(), "max_attempts")
         check("普通模式 每轮都打轮数", len([x for x in logs3 if "轮]" in x]), 3)
         check("普通模式 轮数", b3.stats.attempts, 3)
@@ -189,7 +159,7 @@ def main():
 
         # 普通模式铺满 5 张：抽牌次数按张算，命中那一轮也进总数
         t5 = Table([MISS])
-        b5, _ = make_bot(t5, fast=False, target="任意 任意 任意 任意 任意")
+        b5, _ = make_bot(t5, target="任意 任意 任意 任意 任意")
         check("普通模式 命中停因", b5._run(), "hit")
         check("普通模式 命中轮数", b5.stats.attempts, 1)
         check("普通模式 命中抽牌数", t5.draws, 5)
@@ -205,38 +175,13 @@ def main():
         check("开局有牌 轮数行数", len(marks), 2)
         check("开局有牌 第一行就是第 1 轮", marks[0].endswith("[第 1 轮]"), True)
 
-        # ---------------- 快速模式 + 只要前几张的目标：绝不能连点，会一直中不了
-        t6 = Table([MISS], draws=[Card(5, SUIT_TONG), Card(5, SUIT_SUO),
-                                  Card(3, SUIT_WAN)] * 4)
-        b6, _ = make_bot(t6, fast=True, max_attempts=2, target="5 5 5")
-        check("快速模式三张 停因", b6._run(), "max_attempts")
-        check("快速模式三张 轮数", b6.stats.attempts, 2)
-        check("快速模式三张 绝不连点", t6.bursts, 0)
-        check("快速模式三张 每轮 3 张", t6.draws, 6)
-        check("快速模式三张 放弃次数", t6.forfeits, 2)
-
-        # ------------------------ 连点记账按真翻出的牌算，不按被吃掉的点击次数
-        t4 = Table([MISS])
-        t4.cards = list(MISS)
-        b4, _ = make_bot(t4, stub_burst=False, dry_run=False)
-        b4.board_count = lambda: len(t4.cards)
-        clicks = []
-        B.actions.click_box = lambda box, origin=None: clicks.append(1)
-        try:
-            cards = b4.draw_burst(0.03, 5)
-        finally:
-            B.actions.click_box = real_click
-        check("连点返回手牌", len(cards), 5)
-        check("连点记账=真牌数", b4.stats.draws, 5)
-        check("连点确实点了很多下", len(clicks) > 5, True)
         # ------------------------------------------------ 节拍器：点了就出牌就收工
         t8 = Table([MISS])
         b8 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
-                   fast_mode=False, dry_run=False, verbose=False, logger=lambda s: None)
+                   dry_run=False, verbose=False, logger=lambda s: None)
         b8.hotkey = ""
         b8.ts = FakeTS(t8)
         b8.act = lambda box, what: t8.cards.append(t8.next_card())
-        b8.btn_lit = lambda: True
         got = b8.draw(0)
         check("节拍器 出牌张数", len(got), 1)
         check("节拍器 记账按牌算", b8.stats.draws, 1)
@@ -258,10 +203,9 @@ def main():
 
         t11 = CooldownTable([MISS])
         b11 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
-                    fast_mode=False, dry_run=False, verbose=False, logger=lambda s: None)
+                    dry_run=False, verbose=False, logger=lambda s: None)
         b11.hotkey = ""
         b11.ts = FakeTS(t11)
-        b11.btn_lit = lambda: True
         b11.act = lambda box, what: t11.click()
         t0 = time.time()
         got = b11.draw(0)                       # 第一下就该成
@@ -272,13 +216,27 @@ def main():
         check("冷却 补点后只成功一次", t11.accepted, 2)
         check("冷却 没死等满 6 秒", used < 3.0, True)
 
+        # -------------------- 冷却比节拍长：点空一次要把节拍调大，且下一张照样出得来
+        t12 = CooldownTable([MISS])
+        b12 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
+                    dry_run=False, verbose=False, logger=lambda s: None)
+        b12.hotkey = ""
+        b12.ts = FakeTS(t12)
+        b12.act = lambda box, what: t12.click()
+        t12.last_accept = time.time()          # 假装 0.1 秒前刚点过，这一下必被吃
+        cards = b12.draw(0)
+        check("冷却更长 仍出牌", len(cards), 1)
+        # 起始 1.45，点空 +0.15 → 1.60，出牌后回落 0.01 → 1.59
+        check("冷却更长 节拍自动调大", round(b12.click_delay, 2), 1.59)
+        check("冷却更长 只点了两次", b12.stats.clicks, 2)
+
         # ------------------------------------------------ 放弃前的轮次复核
         class BadRound(FakeTS):
             def read_round_patch(self, patch, min_score=0.55):
                 return 2
 
         t9 = Table([MISS])
-        b9, _ = make_bot(t9, fast=False, max_attempts=1)
+        b9, _ = make_bot(t9, max_attempts=1)
         b9.ts = BadRound(t9)
         check("轮次复核没过 不放弃", b9.drop_round(), "stop")
         check("轮次复核没过 停因", b9.stop_reason, "round_unknown")
@@ -286,7 +244,7 @@ def main():
 
         # 放弃点空了应该重试，而不是直接算放弃成功
         t10 = Table([MISS])
-        b10, _ = make_bot(t10, fast=False, max_attempts=1)
+        b10, _ = make_bot(t10, max_attempts=1)
         b10.forfeit = lambda timeout=1.5, wait_clear=True: False
         check("放弃没点到 先重试", b10.drop_round(), "retry")
         b10.drop_round()

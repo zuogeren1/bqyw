@@ -156,7 +156,7 @@ def cmd_run(args):
 
     bot = Bot(cap, target, lucky=lucky, auto_start=args.start,
               dry_run=args.dry, max_attempts=args.max_attempts,
-              max_bp=args.max_bp, fast_mode=args.fast)
+              max_bp=args.max_bp)
     bot.force = args.force
     bot.keep_console = args.keep_console
     bot.hotkey = args.hotkey or ""
@@ -208,8 +208,6 @@ def build_parser():
     pr.add_argument("--keep-console", action="store_true", help="不最小化控制台（默认会最小化，免得挡住游戏）")
     pr.add_argument("--max-bp", type=int, default=0, dest="max_bp",
                     help="战力点上限，超过就放弃重开；0=不限")
-    pr.add_argument("--fast", action="store_true",
-                    help="快速模式：连抽 5 张再判定（省扫描，但不做提前剪枝、要打 5 个怪）")
     pr.add_argument("--hotkey", default="f11",
                     help="全局急停热键，默认 f11；空字符串关闭")
     pr.set_defaults(func=cmd_run)

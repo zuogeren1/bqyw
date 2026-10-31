@@ -67,7 +67,6 @@ class App(tk.Tk):
         self.v_attempts = tk.StringVar(value="0")
         self.v_maxbp = tk.StringVar(value="0")
         self.v_dry = tk.BooleanVar(value=False)
-        self.v_fast = tk.BooleanVar(value=False)
         self.v_minimize = tk.BooleanVar(value=True)
         self.v_hotkey = tk.StringVar(value="f11")
         self.custom_targets: list[CustomTarget] = [
@@ -114,9 +113,6 @@ class App(tk.Tk):
         ttk.Entry(row2, textvariable=self.v_maxbp, width=6).pack(side="left", padx=(6, 4))
         ttk.Label(row2, text="0=不限", foreground="#888").pack(side="left", padx=(0, 14))
         ttk.Checkbutton(row2, text="只读", variable=self.v_dry).pack(side="left")
-        cb_fast = ttk.Checkbutton(row2, text="快速模式", variable=self.v_fast,
-                                  command=self._sync_estimate)
-        cb_fast.pack(side="left", padx=(12, 0))
         ttk.Checkbutton(row2, text="运行后最小化",
                         variable=self.v_minimize).pack(side="left", padx=12)
 
@@ -406,11 +402,10 @@ class App(tk.Tk):
         所以先显示「计算中…」，扔到后台线程算完再回填。
         """
         target = self._current_target()
-        fast = bool(self.v_fast.get())
-        key = (str(target), fast)
+        key = str(target)
         self._est_want = key
         if key in self._est_cache:
-            self._show_estimate(key, target, fast, self._est_cache[key])
+            self._show_estimate(key, target, self._est_cache[key])
             return
 
         self.lbl_est.configure(text=f"{target} ｜ 计算中…")
@@ -421,18 +416,17 @@ class App(tk.Tk):
             except Exception:                                  # noqa: BLE001
                 n = float("inf")
             self._est_cache[key] = n
-            self.q.put(("estimate", (key, target, fast, n)))
+            self.q.put(("estimate", (key, target, n)))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _show_estimate(self, key, target, fast: bool, n: float):
+    def _show_estimate(self, key, target, n: float):
         if getattr(self, "_est_want", None) != key:
             return                       # 已经切到别的目标了，这条作废
-        tag = "快速 " if fast else ""
         if not n or n > 1e7:
-            self.lbl_est.configure(text=f"{tag}{target} ｜ 基本抽不到")
+            self.lbl_est.configure(text=f"{target} ｜ 基本抽不到")
             return
-        per_round = 8.0 if fast else 8.5       # 实测：快速固定 5 张 8.0s，慢速能提前撤但每抽更慢
+        per_round = 5.0        # 实测：抽牌节拍 1.4s/张，平均抽 3.3 张就撤，加放弃 0.8s
         mins = n * per_round / 60
         if mins >= 90:
             cost = f"{mins / 60:.1f} 小时"
@@ -440,7 +434,7 @@ class App(tk.Tk):
             cost = f"{mins:.0f} 分钟"
         else:
             cost = f"{mins * 60:.0f} 秒"
-        self.lbl_est.configure(text=f"{tag}{target} ｜ 期望 {n:,.0f} 轮 ≈ {cost}")
+        self.lbl_est.configure(text=f"{target} ｜ 期望 {n:,.0f} 轮 ≈ {cost}")
 
     def _refresh_privilege(self):
         if is_admin():
@@ -497,11 +491,10 @@ class App(tk.Tk):
         self._open_log(
             f"# 目标 {target}   今日好运 {self.v_lucky.get()}",
             f"# 重开上限 {max_attempts or '不限'}   战力点上限 {max_bp or '不限'}   "
-            f"只读 {'是' if self.v_dry.get() else '否'}   快速 {'是' if self.v_fast.get() else '否'}",
+            f"只读 {'是' if self.v_dry.get() else '否'}",
             f"# 急停键 {hotkey or '无'}   管理员 {is_admin()}")
         self._append(f"{applog.stamp()} ── 开始：{target}  "
                      f"重开上限={max_attempts or '不限'}  战力点上限={max_bp or '不限'}"
-                     + ("  快速模式" if self.v_fast.get() else "")
                      + ("  只读" if self.v_dry.get() else ""))
 
         if self.v_minimize.get():
@@ -510,15 +503,15 @@ class App(tk.Tk):
         self.worker = threading.Thread(
             target=self._worker, daemon=True,
             args=(target, lucky, max_attempts, max_bp, self.v_dry.get(),
-                  self.v_fast.get(), self.v_hotkey.get().strip()))
+                  self.v_hotkey.get().strip()))
         self.worker.start()
 
-    def _worker(self, target, lucky, max_attempts, max_bp, dry, fast, hotkey):
+    def _worker(self, target, lucky, max_attempts, max_bp, dry, hotkey):
         try:
             from bqyw.screen import Capture
             cap = Capture()
             bot = Bot(cap, target, lucky=lucky, dry_run=dry,
-                      max_attempts=max_attempts, max_bp=max_bp, fast_mode=fast,
+                      max_attempts=max_attempts, max_bp=max_bp,
                       logger=lambda s: self.q.put(("log", s)),
                       on_state=lambda st: self.q.put(("state", st)),
                       stop_flag=self.stop_event)
@@ -593,8 +586,8 @@ class App(tk.Tk):
                         f"第 {st.get('attempts')} 轮   最好 {st.get('best_seen')}   "
                         f"最高 {st.get('best_score')}")
                 elif kind == "estimate":
-                    key, target, fast, n = payload
-                    self._show_estimate(key, target, fast, n)
+                    key, target, n = payload
+                    self._show_estimate(key, target, n)
                 elif kind == "done":
                     reason, bot = payload
                     if self.state() == "iconic":
