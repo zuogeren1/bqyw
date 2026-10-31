@@ -30,6 +30,13 @@ a = Analysis(
     optimize=0,
 )
 
+# cv2 自带的三个 ffmpeg 动态库只给 VideoCapture/VideoWriter 用，本程序从不碰视频。
+# 它们一共 82MB（占整个 exe 解压体积的三分之一），直接从打包清单里剔掉。
+_SKIP_BINARIES = ("opencv_videoio_ffmpeg",)
+_before = len(a.binaries)
+a.binaries = [b for b in a.binaries if not any(s in b[0].lower() for s in _SKIP_BINARIES)]
+print(f"[bqyw.spec] 剔掉 {_before - len(a.binaries)} 个无用二进制（ffmpeg 视频后端）")
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
