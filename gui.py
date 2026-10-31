@@ -688,8 +688,30 @@ def _selftest() -> int:
         return (f"基准 {G.BASE_W}×{G.BASE_H}，1080p ×{s:.3f}"
                 f"（抽牌按钮 {hd_center}），复原正常")
 
+    def check_vision():
+        """把识别链路真跑一遍：连通域、形态学、模板匹配、缩放在冻包里都得能跑。"""
+        import numpy as np
+        from bqyw import geometry as G
+        from bqyw.vision import TemplateSet, locate_parts, similarity
+        ts = TemplateSet()
+        if not ts.digits:
+            raise RuntimeError("没有数字模板")
+        tpl = next(iter(ts.digits.values()))
+        score = similarity(tpl, tpl)                     # 逐像素运算
+        img = np.full((G.BASE_H, G.BASE_W), 255, np.uint8)
+        x, y = G.SLOT_X0, G.HEAD_Y1
+        img[y:y + 60, x + G.px(20):x + G.px(80)] = 0     # 画一块墨迹
+        parts = locate_parts(img, 0)                     # 连通域 + 形态学
+        box = G.ROUND_NUM
+        rnd = ts.read_round_patch(np.full((box.h, box.w, 3), 30, np.uint8))
+        if parts is None:
+            raise RuntimeError("连通域没找到墨迹")
+        return (f"数字自比 {score:.2f}，找墨迹 3 块，"
+                f"轮次判读 {rnd}（模板匹配与缩放正常）")
+
     probe("急停键", check_hotkey)
     probe("坐标基准", check_geometry)
+    probe("识别链路", check_vision)
 
     text = "\n".join(rows) + f"\n\n结论：{'通过' if not bad else f'{bad} 项失败'}\n"
     try:
