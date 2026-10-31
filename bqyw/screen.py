@@ -95,6 +95,40 @@ def is_foreground(hwnd) -> bool:
     return bool(hwnd) and win32gui.GetForegroundWindow() == hwnd
 
 
+def aspect(w: int, h: int) -> str:
+    """2560×1440 → 16:9。约不整也照实写（比如 9:20），不要四舍五入成"差不多"。"""
+    from math import gcd
+
+    if w <= 0 or h <= 0:
+        return "?"
+    g = gcd(int(w), int(h)) or 1
+    return f"{int(w) // g}:{int(h) // g}"
+
+
+def display_info() -> str:
+    """一行环境：屏幕 + 找到的游戏窗口，都带宽高比。
+
+    写进日志头，换机器 / 换分辨率之后一眼就能对上号。
+    """
+    try:
+        u = ctypes.windll.user32
+        sw, sh = int(u.GetSystemMetrics(0)), int(u.GetSystemMetrics(1))
+    except Exception:                                  # noqa: BLE001
+        return "屏幕 读不出"
+    bits = [f"屏幕 {sw}×{sh}（{aspect(sw, sh)}）"]
+    try:
+        hit = find_window()
+    except Exception:                                  # noqa: BLE001
+        hit = None
+    if hit:
+        _hwnd, _title, box = hit
+        w, h = int(box["width"]), int(box["height"])
+        bits.append(f"窗口 {w}×{h}（{aspect(w, h)}）")
+    else:
+        bits.append("窗口 未找到游戏窗口")
+    return "  ".join(bits)
+
+
 def frame_delta(a: np.ndarray, b: np.ndarray, step: int = 4) -> float:
     """两帧的平均差值（0~255）。
 

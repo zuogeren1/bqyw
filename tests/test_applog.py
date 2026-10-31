@@ -93,6 +93,11 @@ with tempfile.TemporaryDirectory() as td:
 check("源码运行时程序目录", applog.app_dir(), Path(__file__).resolve().parent.parent)
 check("MAX_LOGS", applog.MAX_LOGS, 5)
 check("时间戳格式", len(applog.stamp()), len("[00:00:00]"))
-check("表头两行", len(applog.env_header().splitlines()), 2)
+header = applog.env_header().splitlines()
+check("表头三行", len(header), 3)
+check("表头第一行是版本", header[0].startswith("# 百趣演武自动抽牌 v"), True)
+check("表头第二行有运行方式", "运行方式" in header[1], True)
+check("表头第三行有屏幕与窗口比例", "屏幕 " in header[2] and "比例" not in header[2]
+      and "（" in header[2] and "）" in header[2], True)
 
 print(f"全部 {len(OK)} 项通过")

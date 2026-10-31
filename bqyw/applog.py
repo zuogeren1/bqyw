@@ -105,10 +105,18 @@ def env_header() -> str:
         osname = platform.platform()
     except Exception:                                  # noqa: BLE001
         osname = f"{sys.platform}"
-    return "\n".join([
+    try:                       # 屏幕 / 窗口尺寸与比例：换机器后一眼能对上
+        from .screen import display_info
+        env_line = display_info()
+    except Exception:                                  # noqa: BLE001
+        env_line = ""
+    lines = [
         f"# {APP_NAME} v{__version__}",
         f"# {time.strftime('%Y-%m-%d %H:%M:%S')}  {osname}  运行方式 {how}  Python {ver}",
-    ])
+    ]
+    if env_line:
+        lines.append(f"# {env_line}")
+    return "\n".join(lines)
 
 
 def new_log(header: str | None = None, prefix: str = PREFIX):
