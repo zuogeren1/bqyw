@@ -11,9 +11,9 @@ android {
         applicationId = "io.github.zuogeren.bqyw"
         minSdk = 29
         targetSdk = 36
-        // 版本号跟 PC 版保持一致：1.1.0 -> 110
-        versionCode = 110
-        versionName = "1.1.0"
+        // 版本号跟 PC 版保持一致：1.1.1 -> 111
+        versionCode = 111
+        versionName = "1.1.1"
     }
 
     buildTypes {
