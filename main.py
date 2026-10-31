@@ -14,10 +14,12 @@ import re
 import os
 import sys
 
-import cv2
-import numpy as np
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from bqyw import __version__            # noqa: E402  （先落下线程数设置，再导入 numpy）
+
+import cv2                              # noqa: E402
+import numpy as np                      # noqa: E402
 
 # 控制台可能是 GBK，别让个别字符把整个程序打断
 try:
@@ -26,7 +28,6 @@ try:
 except Exception:
     pass
 
-from bqyw import __version__  # noqa: E402
 from bqyw.deck import completion_probability, expected_attempts, full_deck  # noqa: E402
 from bqyw.rules import (HAND_NAME_CN, Hand, all_hands, battle_total,  # noqa: E402
                         best_hand, score)

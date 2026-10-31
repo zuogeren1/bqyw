@@ -69,7 +69,7 @@ def _drawn_from(left: tuple[int, ...]) -> list[Card]:
     return out
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=80_000)
 def _cp_state(state: tuple[int, ...], target: Hand, depth: int) -> float:
     """单个状态的「还能不能凑出 target」。
 

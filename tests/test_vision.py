@@ -102,6 +102,17 @@ for name, want_cards, want_round, want_hl in CASES:
     check(f"{name} 高亮列", find_highlight(img), want_hl)
     check(f"{name} 像抽牌界面", V.looks_like_draw_screen(img), True)
 
+# ---------------- 只抓卡头条带（Bot 轮询用的快路径）也要读得一样
+for name, want_cards, _r, _h in CASES:
+    img = load(name)
+    if img is None or not want_cards:
+        continue
+    G.use_resolution(img.shape[1], img.shape[0])
+    x1, y1, x2, y2 = V.card_band()
+    band = img[y1:y2, x1:x2]
+    got = [(c.point, c.suit) for c in ts.read_hand(band, ox=x1, oy=y1)]
+    check(f"{name} 条带手牌", got, want_cards)
+
 # ---------------- 4K / 5K：参考图放大后再认
 # 没有 4K 显示器，但缩放路径是同一套代码 —— 放大后仍认对，就说明 1.5× 这套换算成立。
 for name, want_cards, want_round, _hl in CASES:

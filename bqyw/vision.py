@@ -33,14 +33,17 @@ def _read_gray(path: str) -> np.ndarray:
     return cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_GRAYSCALE)
 
 
-def locate_parts(gray: np.ndarray, slot: int):
+def locate_parts(gray: np.ndarray, slot: int, ox: int = 0, oy: int = 0):
     """返回 (数字墨迹, 花色墨迹)；卡槽没翻开返回 None。
 
     墨迹靠连通域找，尺寸阈值都随分辨率缩放 —— 归一化到 56×56 之后，
     同一套模板在 1080p / 1440p 下比对结果是一样的（实测相似度 0.93~0.98）。
+
+    ox/oy 是这张图的左上角在原画面里的位置：只抓了卡头条带时，
+    坐标要减掉这个偏移才能落在条带内的正确位置。
     """
-    x = G.SLOT_X0 + G.SLOT_PITCH * slot
-    y1, y2 = G.HEAD_Y1 - G.px(4), G.HEAD_Y2 + G.px(4)
+    x = G.SLOT_X0 + G.SLOT_PITCH * slot - ox
+    y1, y2 = G.HEAD_Y1 - G.px(4) - oy, G.HEAD_Y2 + G.px(4) - oy
     reg = gray[y1:y2, x + G.px(4): x + G.px(152)]
     if reg.size == 0:
         return None
@@ -147,7 +150,12 @@ class TemplateSet:
 
     def read_card(self, frame: np.ndarray, slot: int) -> tuple[Card | None, float]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-        parts = locate_parts(gray, slot)
+        return self.read_card_gray(gray, slot)
+
+    def read_card_gray(self, gray: np.ndarray, slot: int,
+                      ox: int = 0, oy: int = 0) -> tuple[Card | None, float]:
+        """已经是灰度图时走这里 —— 一整手牌只转一次色。"""
+        parts = locate_parts(gray, slot, ox, oy)
         if parts is None:
             return None, 0.0
         dink, gink = parts
@@ -161,11 +169,13 @@ class TemplateSet:
         """读「当前轮次」里的那个数字：1 或 2。第二轮不能放弃重开，必须靠它判断。"""
         if not self.rounds:
             return None
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         b = G.ROUND_NUM
-        crop = gray[b.y1:b.y2, b.x1:b.x2]
+        # 先裁再转灰度：这个框只有 54×42，没必要为它把整帧 2560×1440 转一遍
+        crop = frame[b.y1:b.y2, b.x1:b.x2]
         if crop.size == 0:
             return None
+        if crop.ndim == 3:
+            crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         best, best_score = None, -1.0
         size = (crop.shape[1], crop.shape[0])
         for rnd, tpl in self.rounds.items():
@@ -177,10 +187,16 @@ class TemplateSet:
                 best, best_score = rnd, score
         return best if best_score >= min_score else None
 
-    def read_hand(self, frame: np.ndarray) -> list[Card]:
+    def read_hand(self, frame: np.ndarray, ox: int = 0, oy: int = 0) -> list[Card]:
+        """读手牌。frame 可以是整屏，也可以只是 card_band() 那条；后者要带 ox/oy。
+
+        整屏转灰度一次就够。以前是每个卡槽各转一次，5 张牌就把 2560×1440
+        反复算 5 遍（每次还要临时分配 3.7MB），纯属白烧 CPU 和堆。
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         out: list[Card] = []
         for i in range(G.SLOT_COUNT):
-            card, _ = self.read_card(frame, i)
+            card, _ = self.read_card_gray(gray, i, ox, oy)
             if card is None:
                 break
             out.append(card)
@@ -194,20 +210,24 @@ def draw_btn_region() -> tuple[int, int, int, int]:
     return tuple(G.px(v) for v in DRAW_BTN_REGION)
 
 
-def is_draw_enabled(frame: np.ndarray, min_sat: float = 60.0) -> bool:
-    """「抽牌」按钮是否可点。
+def draw_btn_ready(patch: np.ndarray, min_sat: float = 60.0) -> bool:
+    """已经裁好的「抽牌」按钮区域是否可点。
 
     实测饱和度：可用 ≈ 117，冷却/禁用 ≈ 12，区分度很好。
     用它当"可以点了"的信号，比等整张牌读完更快 —— 按钮比牌面先就绪。
     """
-    if frame is None or frame.size == 0:
-        return False
-    x1, y1, x2, y2 = draw_btn_region()
-    patch = frame[y1:y2, x1:x2]
-    if patch.size == 0:
+    if patch is None or patch.size == 0:
         return False
     hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
     return float(hsv[:, :, 1].mean()) > min_sat
+
+
+def is_draw_enabled(frame: np.ndarray, min_sat: float = 60.0) -> bool:
+    """整帧里的「抽牌」按钮是否可点。"""
+    if frame is None or frame.size == 0:
+        return False
+    x1, y1, x2, y2 = draw_btn_region()
+    return draw_btn_ready(frame[y1:y2, x1:x2], min_sat)
 
 
 CARD_BAND = (150, 320, 2100, 420)      # 5 个卡头的横向条带（基准分辨率）
@@ -244,6 +264,10 @@ def count_cards_band(band: np.ndarray) -> int:
     return n
 
 
+def _gray_of(patch: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY) if patch.ndim == 3 else patch
+
+
 def looks_like_draw_screen(frame: np.ndarray) -> bool:
     """判断这一帧到底是不是百趣演武的抽牌界面。
 
@@ -257,9 +281,9 @@ def looks_like_draw_screen(frame: np.ndarray) -> bool:
     if frame is None or frame.size == 0:
         return False
     try:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-        label = gray[G.px(1015):G.px(1150), G.px(10):G.px(215)]
-        panel = gray[G.px(215):G.px(300), G.px(2235):G.px(2540)]
+        # 两块各转各的：整帧转灰度是 3.7MB，这两块加起来不到 5 万像素
+        label = _gray_of(frame[G.px(1015):G.px(1150), G.px(10):G.px(215)])
+        panel = _gray_of(frame[G.px(215):G.px(300), G.px(2235):G.px(2540)])
         return float(label.mean()) < 120.0 and float(panel.mean()) > 195.0
     except Exception:
         return False

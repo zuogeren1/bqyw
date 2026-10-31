@@ -95,6 +95,19 @@ def is_foreground(hwnd) -> bool:
     return bool(hwnd) and win32gui.GetForegroundWindow() == hwnd
 
 
+def frame_delta(a: np.ndarray, b: np.ndarray, step: int = 4) -> float:
+    """两帧的平均差值（0~255）。
+
+    以前是整帧转 int16 再相减：2560×1440 每比一次要临时分配约 90MB，
+    而放弃之后的淡出期要连比十几次 —— 堆就是被这种瞬时大块撑大的。
+    隔 step 行/列抽稀后只比 1/16 的点，分配量同比例下降，
+    对「画面稳没稳」这个判断没有影响。
+    """
+    sa = a[::step, ::step]
+    sb = b[::step, ::step]
+    return float(np.abs(sa.astype(np.int16) - sb.astype(np.int16)).mean())
+
+
 class Capture:
     """抓屏。
 
@@ -192,8 +205,7 @@ class Capture:
         while time.time() < deadline:
             time.sleep(interval)
             cur = self.grab()
-            same = (cur.shape == prev.shape
-                    and float(np.abs(cur.astype(np.int16) - prev.astype(np.int16)).mean()) < tol)
+            same = cur.shape == prev.shape and frame_delta(cur, prev) < tol
             streak = streak + 1 if same else 0
             prev = cur
             if streak >= need:

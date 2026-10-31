@@ -39,6 +39,7 @@ MULTI = "多选"
 # 多选面板里的展示顺序：由易到难，自定义垫底
 PICK_ORDER = ["对子", "两对", "三条", "顺子", "葫芦", "同花", "四条", "同花顺", "自定义"]
 MAX_ROWS = 5
+MAX_LOG_LINES = 4000        # 日志面板只留最近这么多行，文件里是全的
 NAME_TO_HAND = {v: k for k, v in HAND_NAME_CN.items()}
 NAME_TO_HAND["散牌"] = Hand.HIGH
 
@@ -53,6 +54,7 @@ class App(tk.Tk):
         self.minsize(700, 560)
 
         self.q: queue.Queue = queue.Queue()
+        self._txt_lines = 0
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.running = False
@@ -160,6 +162,12 @@ class App(tk.Tk):
     def _append(self, line: str):
         self.txt.configure(state="normal")
         self.txt.insert("end", line + "\n")
+        self._txt_lines += 1
+        if self._txt_lines > MAX_LOG_LINES:
+            # 跑一整晚能刷出几万行：面板不设上限的话，光是这些文本就要吃掉几十 MB
+            cut = self._txt_lines - MAX_LOG_LINES
+            self.txt.delete("1.0", f"{cut + 1}.0")
+            self._txt_lines = MAX_LOG_LINES
         self.txt.see("end")
         self.txt.configure(state="disabled")
         if self.log_file is not None:                  # 同步落盘，出问题能翻日志

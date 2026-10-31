@@ -2,6 +2,7 @@
 """抽牌状态机：抽 → 判定 → 达不到就重开 → 命中就停。"""
 from __future__ import annotations
 
+import ctypes
 import threading
 import time
 from dataclasses import dataclass, field
@@ -12,13 +13,53 @@ from . import actions, geometry as G, privilege
 from .deck import MAX_DRAWS
 from .rules import (HAND_NAME_CN, MULT, Hand, all_hands, best_hand, score)
 from .targets import HandTarget, TargetBase
-from .vision import (TemplateSet, card_band, count_cards_band, expected_highlight, find_highlight,
-                     is_draw_enabled, looks_like_draw_screen, modal_confirm_visible,
+from .vision import (TemplateSet, card_band, count_cards_band, draw_btn_ready,
+                     draw_btn_region, expected_highlight, find_highlight,
+                     looks_like_draw_screen, modal_confirm_visible,
                     )
+
+
+MEM_REPORT_SECONDS = 300        # 每隔这么久往日志里写一行内存
+MAX_HISTORY = 200               # 战绩里最多留几手牌（不参与判定，只供回头查）
 
 
 class Abort(Exception):
     """发现不能继续时的急停信号。"""
+
+
+class _MEMCOUNTERS(ctypes.Structure):
+    """PROCESS_MEMORY_COUNTERS_EX。psapi 的称为 EX 的那个尾巴多一个 PrivateUsage。"""
+
+    _fields_ = [
+        ("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong),
+        ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+        ("PrivateUsage", ctypes.c_size_t),
+    ]
+
+
+def meminfo() -> tuple[float, float, float] | None:
+    """(工作集 MB, 提交 MB, 峰值工作集 MB)；调用失败返回 None。"""
+    try:
+        k32 = ctypes.windll.kernel32
+        # 必须 OpenProcess：GetCurrentProcess() 的伪句柄是 -1，当成 c_int 传给
+        # psapi 会变成一个无效句柄，调用失败还得不出原因
+        h = k32.OpenProcess(0x0400 | 0x0010, False, k32.GetCurrentProcessId())
+        if not h:
+            return None
+        try:
+            p = _MEMCOUNTERS()
+            p.cb = ctypes.sizeof(p)
+            if not ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(p), p.cb):
+                return None
+            mb = 2 ** 20
+            return p.WorkingSetSize / mb, p.PrivateUsage / mb, p.PeakWorkingSetSize / mb
+        finally:
+            k32.CloseHandle(h)
+    except Exception:                                  # noqa: BLE001
+        return None
 
 
 def _minimize_console() -> None:
@@ -83,6 +124,8 @@ class Bot:
         self._draw_fail = 0
         self._grace = 0              # >0 时跳过若干帧的结构自检（放弃后的淡出期）
         self._armed = False          # 本轮的「重开次数」已经记过账了没
+        self._mem_at = 0.0           # 上次往日志里写内存的时间
+        self._mem_last: tuple[float, float] | None = None
 
     # ---------------------------------------------------------- 小工具
     def log(self, msg: str):
@@ -94,6 +137,33 @@ class Bot:
 
     def stopped(self) -> bool:
         return bool(self.stop_flag and self.stop_flag.is_set())
+
+    def _remember(self, cards):
+        """记一手牌。元素数封顶 —— 一晚上几千轮，不封顶就是一根慢慢涨的内存。"""
+        self.stats.history.append(list(cards))
+        if len(self.stats.history) > MAX_HISTORY:
+            del self.stats.history[:len(self.stats.history) - MAX_HISTORY]
+
+    def _mem_tick(self):
+        """隔几分钟把内存写进日志。
+
+        用户反馈"占内存"时，日志里就有现成的曲线；平时几乎不占篇幅
+        （变化小于 16MB 就不写）。
+        """
+        now = time.time()
+        if now - self._mem_at < MEM_REPORT_SECONDS:
+            return
+        self._mem_at = now
+        info = meminfo()
+        if info is None:
+            return
+        ws, commit, peak = info
+        if (self._mem_last is not None
+                and abs(ws - self._mem_last[0]) < 16
+                and abs(commit - self._mem_last[1]) < 16):
+            return
+        self._mem_last = (ws, commit)
+        self.log(f"[内存] 占用 {ws:.0f} MB（提交 {commit:.0f} MB，峰值 {peak:.0f} MB）")
 
     def emit(self, **kw):
         if not self.on_state:
@@ -141,12 +211,22 @@ class Bot:
             cards = self.ts.read_hand(frame)
         return frame, cards
 
+    def hand_now(self) -> list:
+        """只抓卡头条带读手牌。
+
+        整屏抓一次是 14.7MB，这条条带只有 700KB。抽一张牌要轮询几十次，
+        差的是几十倍的分配量 —— 堆被 14MB 级的大块反复冲刷，是内存上去下不来的
+        主要原因之一。
+        """
+        x1, y1, x2, y2 = card_band()
+        return self.ts.read_hand(self.cap.grab_region(x1, y1, x2, y2), ox=x1, oy=y1)
+
     def wait_cards(self, expect: int, timeout: float = 3.0) -> list:
-        """等卡槽翻到至少 expect 张。用裸抓帧 + 手牌一致判定，不做整屏稳定等待。"""
+        """等卡槽翻到至少 expect 张。用卡头条带 + 手牌一致判定，不做整屏稳定等待。"""
         deadline = time.time() + timeout
         prev = None
         while time.time() < deadline:
-            cards = self.ts.read_hand(self.cap.grab())
+            cards = self.hand_now()
             key = tuple((c.point, c.suit) for c in cards)
             if key == prev and len(cards) >= expect:
                 return cards
@@ -154,13 +234,18 @@ class Bot:
             if self.stopped():
                 break
             time.sleep(0.05)
-        return self.ts.read_hand(self.cap.grab())
+        return self.hand_now()
 
     def wait_draw_ready(self, timeout: float = 2.5) -> bool:
-        """等「抽牌」按钮从冷却里恢复（按钮变亮），最多等 timeout 秒。"""
+        """等「抽牌」按钮从冷却里恢复（按钮变亮），最多等 timeout 秒。
+
+        只看按钮那一小块（200×90）：以前每 40ms 抓一次整屏，光等按钮就能
+        白扔掉几百 MB 的临时分配。
+        """
+        x1, y1, x2, y2 = draw_btn_region()
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if is_draw_enabled(self.cap.grab()):
+            if draw_btn_ready(self.cap.grab_region(x1, y1, x2, y2)):
                 return True
             if self.stopped():
                 return False
@@ -272,7 +357,7 @@ class Bot:
         过渡期的几次点击游戏会直接丢弃，不影响结果，白白省下 0.28 秒。
         """
         t0 = time.time()
-        self.stats.history.append(self._last_cards)
+        self._remember(self._last_cards)
         self.act(G.BTN_FORFEIT, "放弃挑战")
         t1 = time.time()
         deadline = time.time() + timeout
@@ -431,6 +516,7 @@ class Bot:
                 self.stop_reason = "stopped"
                 self.log("已按你的要求停止。")
                 return self.stop_reason
+            self._mem_tick()
             if self._grace > 0:
                 # 刚放弃完，屏幕还在淡出：等画面稳住再读，跳过弹窗/结构判定
                 self._grace -= 1
@@ -494,7 +580,7 @@ class Bot:
 
             # ---- 命中
             if cards and self.target.matches(cards, left):
-                self.stats.history.append(cards)
+                self._remember(cards)
                 self.log(f"\n命中 {self.target}："
                          f"{[(c.point, c.suit) for c in cards]}  "
                          f"战力点 {sum(c.point for c in cards)}  "
