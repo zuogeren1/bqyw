@@ -42,7 +42,6 @@ class CaptureService : Service() {
         const val EXTRA_MAX = "max"
         const val EXTRA_HAND = "hand"
         const val EXTRA_ORDERED = "ordered"
-        const val EXTRA_FAST = "fast"
 
         @Volatile
         var instance: CaptureService? = null
@@ -76,8 +75,7 @@ class CaptureService : Service() {
         specs: List<String>,
         handNames: List<String>,
         ordered: Boolean = false,
-        fast: Boolean = false,
-    ) = startBot(specs, handNames, 0, ordered, fast)
+    ) = startBot(specs, handNames, 0, ordered)
 
     fun stopBotFromUi() = stopBot()
 
@@ -116,7 +114,6 @@ class CaptureService : Service() {
                     ),
                     intent.getIntExtra(EXTRA_MAX, 0),
                     intent.getBooleanExtra(EXTRA_ORDERED, false),
-                    intent.getBooleanExtra(EXTRA_FAST, false),
                 )
             }
             ACTION_STOP_BOT -> stopBot()
@@ -191,7 +188,6 @@ class CaptureService : Service() {
         handNames: List<String>,
         maxAttempts: Int,
         ordered: Boolean = false,
-        fast: Boolean = false,
     ) {
         if (reader == null) {
             BotLog.add("[!] 还没授权抓屏，先在 App 里点「授权抓屏」")
@@ -224,15 +220,16 @@ class CaptureService : Service() {
 
         botStop = false
         botRunning = true
+        // 每次开跑新开一份 run_*.log（旧的多余的顺手删掉），头部写进这份文件
+        BotLog.newRun(this)
         // 启动头 + 开跑三行，和 PC 版日志开头同一个写法
         BotLog.header(this, capW, capH)
         BotLog.add(
             "── 开始：" + target +
-                "  重开上限=" + (if (maxAttempts > 0) maxAttempts.toString() else "不限") +
-                (if (fast) "  快速模式" else ""),
+                "  重开上限=" + (if (maxAttempts > 0) maxAttempts.toString() else "不限"),
         )
         BotLog.add("目标：" + target)
-        BotLog.add("抓取源：屏幕镜像" + (if (fast) "（快速模式：连抽 5 张）" else ""))
+        BotLog.add("抓取源：屏幕镜像")
         BotLog.add(
             "画面 " + capW + "×" + capH + "（" + BotLog.aspect(capW, capH) +
                 "），坐标缩放 " + String.format(Locale.US, "%.3f", Fit(capW, capH).s),
@@ -251,7 +248,7 @@ class CaptureService : Service() {
                     return@Thread
                 }
                 BotLog.add("点按方式：" + Tap.current())
-                bot = Bot(engine, target, maxAttempts, fast) { BotLog.add(it) }
+                bot = Bot(engine, target, maxAttempts) { BotLog.add(it) }
                 reason = bot.run()
             } catch (e: Throwable) {
                 BotLog.add("   [!] 异常：" + e.javaClass.simpleName + " " + (e.message ?: ""))

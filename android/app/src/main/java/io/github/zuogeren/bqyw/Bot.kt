@@ -12,17 +12,8 @@ class Bot(
     private val engine: Engine,
     private val target: TargetBase,
     private val maxAttempts: Int,
-    private val fast: Boolean = false,
     private val log: (String) -> Unit,
 ) {
-
-    /**
-     * 能不能「连点铺满 5 张」。
-     *
-     * 自定义目标只要前几张时（「不抽」），多抽一张就不是这个目标了，
-     * 所以哪怕开了快速模式也只能一张一张来。
-     */
-    private val burstMode = fast && target.stopCount >= Target.MAX_DRAWS
 
     /** 已经读到手牌的有几轮。 */
     private var attempts = 0
@@ -36,6 +27,38 @@ class Bot(
 
     private var startedAt = 0L
 
+    // ------------------------------------------------------------ 点击节拍
+    //
+    // 游戏抽牌有冷却（实测 ≈1.38s）。三种错法都踩过：
+    //   * 点一下干等 2.5s —— 点空时白等一整个周期；
+    //   * 补点间隔贴着冷却（1.15s）—— 大半点击落在冷却里，两三下才出一张牌；
+    //   * 每出一张就 −0.02 慢慢回收 —— 一路滑到 1.25，每隔十来张点空一次，来回抵消。
+    // 所以这里是「固定节拍 + 点空加码 + 出牌回收但不低于下限」，跨轮保持。
+
+    /** 两次「抽牌」之间的间隔，秒。初值就是真机验过的值。 */
+    private var clickDelay = CLICK_DELAY
+
+    /** 上一次点击的时刻。 */
+    private var lastTapAt = 0L
+
+    /** 上一次点击还没换来新牌（用来判这一下有没有点空）。 */
+    private var tapPending = false
+
+    /** 上一次点击那一刻牌桌上已有几张牌。 */
+    private var tapPendingFilled = 0
+
+    /** 判定点空了几次，用来控制日志频次。 */
+    private var dropCount = 0
+
+    /** 真正放弃过几次。「轮」只统计判满 5 张的局，早期放弃的局不记轮，所以放弃耗时得按它平摊。 */
+    private var forfeitCount = 0
+
+    /** 耗时统计，每 10 轮打一行 [节奏]。 */
+    private var readMs = 0L
+    private var tapMs = 0L
+    private var waitMs = 0L
+    private var forfeitMs = 0L
+
     interface Engine {
         fun frame(): Bitmap?
         fun tap(x: Int, y: Int): Boolean
@@ -46,6 +69,15 @@ class Bot(
 
     fun run(): String {
         startedAt = System.currentTimeMillis()
+        try {
+            return runLoop()
+        } finally {
+            // 短跑也要看得到账：正常节奏行每 10 轮才有一次，退出前补一条（没翻出牌就不写）
+            if (cardsDrawn > 0) logPace()
+        }
+    }
+
+    private fun runLoop(): String {
         var idle = 0
         var noFrame = 0
         var noRound = 0
@@ -57,7 +89,9 @@ class Bot(
         // 刚放弃完的一小段时间里，牌桌上的牌可能是正在淡出的旧牌，读到不算数
         var calmUntil = 0L
         while (!engine.isStopped()) {
+            val tShot = System.nanoTime()
             val bmp = shot()
+            readMs += msSince(tShot)
             if (bmp == null) {
                 noFrame++
                 if (noFrame % 20 == 0) log("   [!] 拿不到画面（抓屏停了？）")
@@ -82,7 +116,9 @@ class Bot(
                 continue
             }
 
+            val tBadge = System.nanoTime()
             val rnd = Badge.read(bmp)
+            readMs += msSince(tBadge)
             if (rnd == 0) {
                 bmp.recycle()
                 noRound++
@@ -116,13 +152,17 @@ class Bot(
             }
             badRound = 0
 
+            val tCards = System.nanoTime()
             val cards = CardReader.readCards(bmp)
+            readMs += msSince(tCards)
             bmp.recycle()
             val pts = cards.map { it.point }.toIntArray()
             val filled = pts.count { it > 0 }
             // 只统计真翻出来的牌（不是点击次数），结束摘要里的「张牌」按这个算
             if (filled > prevCards) cardsDrawn += filled - prevCards
             prevCards = filled
+            // 点击节拍：多出一张就慢慢回收，点空了就往上抬（跨轮保持，别每轮重置）
+            updateBeat(filled)
             if (filled > 0 && System.currentTimeMillis() < calmUntil) {
                 sleep(120)
                 continue
@@ -160,7 +200,7 @@ class Bot(
                     // 连着抽几次都没多出一张：多半是有张牌没认出来，别一直空点下去
                     if (filled <= lastFilled) {
                         noGain++
-                        if (noGain >= (if (fast) 3 else 8)) {
+                        if (noGain >= 8) {
                             log("   [!] 连续 " + noGain + " 次抽牌都没多出一张，停止")
                             return "stuck_draw"
                         }
@@ -169,23 +209,48 @@ class Bot(
                     }
                     lastFilled = filled
                     // 提前剪枝：剩下这几抽怎么都凑不出目标了，直接重开，别浪费时间
-                    // （连点铺满的快速模式刻意不做，用剪枝换吞吐）
-                    if (!burstMode && intact && !target.possible(drawn, left)) {
+                    if (intact && !target.possible(drawn, left)) {
                         log("     " + target + " 已不可能，提前放弃")
+                        if (!roundStillOne()) {
+                            // 第二轮按放弃等于退出整场演算，读不准就再等一圈
+                            log("   [!] 轮次复核没通过，先不放弃")
+                            calmUntil = System.currentTimeMillis() + 1500
+                            continue
+                        }
                         forfeit()
                         calmUntil = System.currentTimeMillis() + 1500
                         continue
                     }
                 }
-                if (burstMode) {
-                    burst()
-                } else {
-                    val p = Geom.tapDraw()
-                    act("抽牌", p.first, p.second)
-                    engine.tap(p.first, p.second)
-                    drawTaps++
-                    sleep(850)
+                // 先等够节拍，再用「这一刻新抓的一帧」判上一拍有没有点空：
+                // 此刻距上次点击已满一个完整节拍，牌该出来的一定出来了，云端流延迟也吃得住
+                waitTapSlot()
+                val nowFilled = filledNow()
+                if (nowFilled != null && tapPending && nowFilled <= tapPendingFilled) {
+                    tapPending = false
+                    dropCount++
+                    clickDelay = minOf(CLICK_DELAY_MAX, clickDelay + CLICK_DELAY_STEP)
+                    // 前 3 次和之后每 10 次写一行，别刷屏
+                    if (dropCount <= 3 || dropCount % 10 == 0) {
+                        log("   [!] 这一下点空了，点击节拍调到 " + f(clickDelay, 2) + "s")
+                    }
                 }
+                // 抽牌：点完记一笔，好判这一下有没有点空
+                val p = Geom.tapDraw()
+                act("抽牌", p.first, p.second)
+                // 节拍从「派发点击」算起：tap 本身要等手势回调或 shell，别让它吃掉节拍
+                lastTapAt = System.currentTimeMillis()
+                val tTap = System.nanoTime()
+                engine.tap(p.first, p.second)
+                tapMs += msSince(tTap)
+                drawTaps++
+                tapPending = true
+                // 基线用「这次点击前刚读到的张数」，不是循环开头那帧的旧值
+                tapPendingFilled = nowFilled ?: filled
+                // 别盲等太久：云端一张牌从点下到翻出来约 1 秒，盲等 850ms 会正好错过，
+                // 于是"上一张"要等下一圈才看到，实测单张被拖到 2.0 秒。
+                // 只等 300ms 就回去读，牌一出现立刻进入判定；多抓两帧的代价远小于等一整圈。
+                sleep(300)
                 continue
             }
             idle = 0
@@ -208,6 +273,7 @@ class Bot(
                 "   [" + drawn.size + "张] " + cardsText(drawn) +
                     " 牌型=" + hand.cn + " 战力点=" + pts.sum(),
             )
+            if (attempts % 10 == 0) logPace()
             if (intact && target.matches(drawn, left)) {
                 log("命中 " + target + "：" + cardsText(drawn) +
                     "  战力点 " + pts.sum() + "  预估奖励点 " + Hands.score(drawn))
@@ -218,22 +284,22 @@ class Bot(
                 log("达到重开上限 " + maxAttempts + "，停止")
                 return "max"
             }
-            if (burstMode) {
-                // 快速模式：确认完直接开下一轮连点，不读牌也不等淡出
-                forfeitFast()
-                burst()
-            } else {
-                forfeit()
-                calmUntil = System.currentTimeMillis() + 1500
+            if (!roundStillOne()) {
+                // 第二轮按放弃等于退出整场演算，读不准就再等一圈
+                log("   [!] 轮次复核没通过，先不放弃")
+                sleep(400)
+                continue
             }
+            forfeit()
+            calmUntil = System.currentTimeMillis() + 1500
         }
         return "stopped"
     }
 
     /**
      * 结束摘要，写法和 PC 版一致：
-     * 用时 602s，105 轮，平均 5.7s/轮，587 张牌，1.02s/张（点击 1.22 次/张）。
-     * 一张牌都没翻出来时后面几项整项不写 —— 算不出来的不编。
+     * 用时 602s，105 轮，平均 5.7s/轮，587 张牌，1.02s/张（点击 1.22 次/张），点击节拍 1.45 s。
+     * 一张牌都没翻出来时中间几项整项不写 —— 算不出来的不编。
      */
     fun summary(): String {
         val secs = (System.currentTimeMillis() - startedAt) / 1000.0
@@ -246,8 +312,70 @@ class Bot(
             sb.append("（点击 ").append(f(drawTaps.toDouble() / cardsDrawn, 2))
                 .append(" 次/张）")
         }
+        sb.append("，点击节拍 ").append(f(clickDelay, 2)).append(" s")
         return sb.toString()
     }
+
+    // ------------------------------------------------------------ 节拍
+
+    /** 等到能点下一张：距上次点击不足 [clickDelay] 就分段睡，急停能马上退出来。 */
+    private fun waitTapSlot() {
+        val from = System.currentTimeMillis()
+        while (!engine.isStopped()) {
+            val left = clickDelay * 1000.0 - (System.currentTimeMillis() - lastTapAt)
+            if (left <= 0.0) break
+            sleep(minOf(left, 50.0).toLong().coerceAtLeast(1L))
+        }
+        waitMs += System.currentTimeMillis() - from
+    }
+
+    /**
+     * 出牌了就慢慢回收节拍（不低于 1.40s）。
+     *
+     * 点空的判定放在「下一次点击之前」做，而且还用那一刻新抓的一帧，见抽牌分支：
+     * 安卓一帧是 850ms 打底再加截屏和认牌，云端还有流延迟，牌常常是下一帧才出现 ——
+     * 按「多久没出牌」判会被下一张牌盖掉，空点永远查不出来。
+     *
+     * 回收保下限是关键：贴着冷却走的话大半点击落在冷却里，只能靠「每隔十来张
+     * 点空一次」抵消回来，等于白折腾。
+     */
+    private fun updateBeat(filled: Int) {
+        if (filled > tapPendingFilled) {
+            clickDelay = maxOf(CLICK_DELAY_MIN, clickDelay - CLICK_RECOVER)
+            // 出牌了就把这笔账结掉，否则下一拍会被误判成点空
+            tapPending = false
+        }
+    }
+
+    /**
+     * 放弃前重新截一帧再读一次徽章。
+     *
+     * 第二轮按「放弃挑战」等于退出整场演算，一次误读代价太大，宁可多抓一帧。
+     */
+    private fun roundStillOne(): Boolean {
+        val bmp = shot() ?: return false
+        return try {
+            Badge.read(bmp) == 1
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    /** 每 10 轮打一行节奏账：等节拍 / 点击 / 读牌 / 放弃各花了多少。 */
+    private fun logPace() {
+        val n = cardsDrawn.coerceAtLeast(1)
+        val r = forfeitCount.coerceAtLeast(1)
+        log(
+            "[节奏] " + cardsDrawn + " 张 / " + attempts + " 轮：" +
+                "等节拍 " + f(waitMs / 1000.0 / n, 2) + "s/张，" +
+                "点击 " + f(tapMs / 1000.0 / n, 2) + "，" +
+                "读牌 " + f(readMs / 1000.0 / n, 2) + "，" +
+                "放弃 " + f(forfeitMs / 1000.0 / r, 2) + "s/轮，" +
+                "点击节拍 " + f(clickDelay, 2) + "s",
+        )
+    }
+
+    // ------------------------------------------------------------ 放弃
 
     private fun forfeit() {
         val t0 = System.currentTimeMillis()
@@ -256,6 +384,7 @@ class Bot(
         engine.tap(fp.first, fp.second)
         val t1 = System.currentTimeMillis()
         if (!waitModal(1500)) {
+            forfeitMs += System.currentTimeMillis() - t0
             log("   [!] 没等到放弃确认弹窗，这一下可能点空了")
             return
         }
@@ -272,6 +401,13 @@ class Bot(
             waitClear(2000)
         }
         val t4 = System.currentTimeMillis()
+        forfeitMs += t4 - t0
+        forfeitCount++
+        // 牌桌是我们自己清空的：上一拍的"账"到此作废。
+        // 不清的话，下一拍会拿"清空后的 0 张"去比"清空前记的 N 张"，必然判成点空，
+        // 节拍每轮白涨 0.15s（实测 1.45 → 1.58 → 1.73 → 1.88，单张被拖到 2.07s）。
+        tapPending = false
+        tapPendingFilled = 0
         waitReady(2500)
         // 耗时拆解和 PC 版一样，卡在哪一段一眼能看到
         log("   （放弃 " + sec(t0, t4) + "s = 点击 " + sec(t0, t1) +
@@ -337,6 +473,18 @@ class Bot(
 
     private fun shot(): Bitmap? = engine.frame()
 
+    /** 抓一帧数翻开的张数；抓不到画面就返回 null，调用方跳过判定、别记点空。 */
+    private fun filledNow(): Int? {
+        val t0 = System.nanoTime()
+        val bmp = shot() ?: return null
+        return try {
+            CardReader.readCards(bmp).count { it.point > 0 }
+        } finally {
+            bmp.recycle()
+            readMs += msSince(t0)
+        }
+    }
+
     private fun sleep(ms: Long) {
         try {
             Thread.sleep(ms)
@@ -362,116 +510,23 @@ class Bot(
     /** 两段时刻之间隔了多久，秒、留两位。 */
     private fun sec(from: Long, to: Long): String = f((to - from) / 1000.0, 2)
 
+    /** 从 [fromNanos] 到现在，毫秒。 */
+    private fun msSince(fromNanos: Long): Long = (System.nanoTime() - fromNanos) / 1_000_000
+
     /** 固定按 US 格式化，免得某些机型把小数点写成逗号。 */
     private fun f(x: Double, digits: Int): String =
         String.format(Locale.US, "%." + digits + "f", x)
 
-    // ------------------------------------------------------------ 快速模式
-
-    /**
-     * 对着抽牌按钮连点，把 5 张一口气铺满，中间不读牌。
-     *
-     * 游戏在抽牌冷却期会把多出来的点击直接丢掉，不会排队，所以不用等按钮变亮，
-     * 狂点就行；省掉的是「每张牌都要等渲染再认一遍」的开销。
-     * 代价是做不了提前剪枝，而且必然是 5 张牌 = 5 个敌人。
-     */
-    private fun burst() {
-        val start = System.currentTimeMillis()
-        val end = start + BURST_MS
-        var nextCheck = start + BURST_CHECK
-        var sent = 0
-        val p = Geom.tapDraw()
-        act("快速连点 " + f(BURST_MS / 1000.0, 1) + "s", p.first, p.second)
-        var full = false
-        var bail = false
-        while (System.currentTimeMillis() < end && !engine.isStopped()) {
-            engine.tap(p.first, p.second)
-            sent++
-            sleep(BURST_GAP)
-            if (System.currentTimeMillis() >= nextCheck) {
-                nextCheck += BURST_CHECK
-                val n = filledCount()
-                if (n >= 5) {
-                    full = true
-                    break
-                }
-                // 一张都没抽出来、还立着确认弹窗：放弃没生效，交回主循环去确认
-                if (n == 0 && modalNow()) {
-                    bail = true
-                    break
-                }
-            }
-        }
-        drawTaps += sent
-        log("      连点 " + sent + " 次 / 用时 " +
-            f((System.currentTimeMillis() - start) / 1000.0, 1) + "s")
-        if (bail) {
-            log("   [!] 放弃没生效，先回去把弹窗确认掉")
-            return
-        }
-        if (full) return
-        // 被急停打断时不算失败，不用报
-        if (!engine.isStopped() && !waitFilled(1500)) {
-            log("   [!] 只铺到 " + filledCount() + " 张（预期 5），按现有手牌判定")
-        }
-    }
-
-    /** 快速模式的放弃：确认完就走，不等牌淡出——下一轮连点会把过渡期吃掉。 */
-    private fun forfeitFast() {
-        val fp = Geom.tapForfeit()
-        act("放弃挑战", fp.first, fp.second)
-        engine.tap(fp.first, fp.second)
-        if (!waitModal(1500)) {
-            log("   [!] 没等到放弃确认弹窗，这一下可能点空了")
-            return
-        }
-        sleep(150)
-        val cp = Geom.tapConfirm()
-        act("确认放弃", cp.first, cp.second)
-        engine.tap(cp.first, cp.second)
-        // 确认这一下偶尔会被落位动画吞掉，弹窗留着的话后面连点就全打在它上面
-        if (waitModal(200)) {
-            sleep(80)
-            engine.tap(cp.first, cp.second)
-        }
-    }
-
-    /** 此刻屏幕上有放弃确认弹窗吗。 */
-    private fun modalNow(): Boolean {
-        val bmp = shot() ?: return false
-        val m = isModal(bmp)
-        bmp.recycle()
-        return m
-    }
-
-    private fun filledCount(): Int {
-        val bmp = shot() ?: return 0
-        val n = CardReader.readCards(bmp).count { it.point > 0 }
-        bmp.recycle()
-        return n
-    }
-
-    private fun waitFilled(ms: Long): Boolean {
-        val end = System.currentTimeMillis() + ms
-        while (System.currentTimeMillis() < end && !engine.isStopped()) {
-            if (filledCount() >= 5) return true
-            sleep(120)
-        }
-        return false
-    }
-
     private companion object {
-        /**
-         * 连点的最长时长。5 张受游戏冷却限制，实测 5.5 秒左右铺满，
-         * 但放弃后的过场会白白吃掉开头约 1 秒，所以给到 8 秒；
-         * 铺满了会在 500ms 的探测点提前收手，所以放宽不花时间。
-         */
-        const val BURST_MS = 8000L
+        /** 两次点击的间隔（秒）：冷却实测 ≈1.38s，留一点余量。 */
+        const val CLICK_DELAY = 1.45
 
-        /** 连点间隔：手势本身 40ms，加这点间隔一秒十来下。 */
-        const val BURST_GAP = 55L
+        /** 点空一次往上抬多少、抬到多少封顶。 */
+        const val CLICK_DELAY_STEP = 0.15
+        const val CLICK_DELAY_MAX = 2.30
 
-        /** 连点过程中每隔这么久瞄一眼牌面，铺满就提前收手。 */
-        const val BURST_CHECK = 500L
+        /** 每多出一张牌回落多少，但绝不低于这个下限（贴回 1.25 会一路点空）。 */
+        const val CLICK_RECOVER = 0.01
+        const val CLICK_DELAY_MIN = 1.40
     }
 }

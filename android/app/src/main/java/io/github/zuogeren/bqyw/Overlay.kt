@@ -23,7 +23,7 @@ import android.widget.TextView
  * 悬浮球：游戏里也能操作的主界面。
  *
  * 收起只有一个小球，拖动移动、点一下展开。展开后一次只显示一页：
- *  - 主面板：当前目标摘要 + 按顺序 / 快速 + 开始 / 停止 / 状态
+ *  - 主面板：当前目标摘要 + 按顺序 + 开始 / 停止 / 状态
  *  - 牌型页：9 个标准牌型 + 自定义，都能多选，达成其中任意一个就停手
  *  - 自定义页：可以写好几组，每组 1~5 张，达成任意一组就停手
  *  - 点数页：改某一组里的某一格（点数 / 花色 / 「不抽」）
@@ -59,7 +59,6 @@ class Overlay(private val ctx: Context) {
     }
 
     private var ordered = false
-    private var fast = false
 
     private var mode = MODE_MAIN
     private var editGroup = 0
@@ -204,18 +203,6 @@ class Overlay(private val ctx: Context) {
             }
         }
         b.addView(orderBox)
-
-        val fastBox = CheckBox(ctx).apply {
-            text = "快速模式（连点铺满，不提前放弃）"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            isChecked = fast
-            setOnCheckedChangeListener { _, v ->
-                fast = v
-                handler.post { render() }
-            }
-        }
-        b.addView(fastBox)
 
         val hint = TextView(ctx).apply {
             setTextColor(Color.parseColor("#FFFFC857"))
@@ -411,14 +398,8 @@ class Overlay(private val ctx: Context) {
         return if (n == 0) "选择牌型 / 自定义" else "已选 " + n + " 个目标（点击修改）"
     }
 
-    private fun hintText(): String {
-        val stop = currentTarget()?.stopCount ?: Target.MAX_DRAWS
-        return when {
-            customOn && handSel.isNotEmpty() -> "牌型和自定义一起判定，成任意一个就停"
-            fast && stop < Target.MAX_DRAWS -> "目标只要前几张，快速模式也不会连点铺满"
-            else -> " "
-        }
-    }
+    private fun hintText(): String =
+        if (customOn && handSel.isNotEmpty()) "牌型和自定义一起判定，成任意一个就停" else " "
 
     /** 底部摘要：用和开跑时同一个目标对象，优先级、牌型名都不会跟实际跑的差开。 */
     private fun summaryView(): TextView = TextView(ctx).apply {
@@ -440,7 +421,7 @@ class Overlay(private val ctx: Context) {
             BotLog.add("[!] 还没选目标：点开「选择牌型 / 自定义」勾一个")
             return
         }
-        svc.startBotFromUi(specs(), handNames(), ordered, fast)
+        svc.startBotFromUi(specs(), handNames(), ordered)
         collapse()
     }
 

@@ -16,7 +16,11 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import rikka.shizuku.Shizuku
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /** 主界面：填目标 → 授权抓屏 → 开始；日志直接显示在下面。 */
 class MainActivity : Activity() {
@@ -84,6 +88,8 @@ class MainActivity : Activity() {
         button("④ 授权悬浮窗") { requestOverlay() }
         button("⑤ 显示悬浮球") { showOverlay() }
         button("⑥ 停止") { stopBot() }
+        button("⑦ 导出日志") { exportLog() }
+        button("⑧ 复制日志") { copyLog() }
 
         root.addView(status)
         root.addView(logView)
@@ -198,6 +204,122 @@ class MainActivity : Activity() {
         BotLog.add("停止：下发停止指令")
     }
 
+    // ------------------------------------------------------------ 日志导出 / 复制
+
+    /** ⑦ 导出日志：走 SAF（ACTION_CREATE_DOCUMENT），存哪儿由用户挑。 */
+    private fun exportLog() {
+        val name = "bqyw-log-" +
+            SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date()) + ".log"
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TITLE, name)
+        }
+        try {
+            startActivityForResult(intent, REQ_EXPORT)
+        } catch (e: Throwable) {
+            val msg = e.message ?: e.javaClass.simpleName
+            toast("打不开导出窗口：" + msg)
+            BotLog.add("[!] 打不开导出窗口：" + msg)
+        }
+    }
+
+    /**
+     * 写到用户选好的位置。
+     *
+     * 选完位置才读文件：这中间机器人可能又写了几行；读和写都在后台线程，别卡界面。
+     */
+    private fun exportTo(uri: android.net.Uri) {
+        Thread {
+            var saved = 0
+            var why: String? = null
+            try {
+                val text = readLog()
+                if (text.isEmpty()) {
+                    why = "还没有日志"
+                } else {
+                    contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(text.toByteArray())
+                    } ?: throw java.io.IOException("打不开目标文件")
+                    saved = text.lineSequence().count { it.isNotEmpty() }
+                }
+            } catch (e: Throwable) {
+                why = e.message ?: e.javaClass.simpleName
+            }
+            val where = displayName(uri)
+            handler.post {
+                val err = why
+                if (err == null) {
+                    toast("已导出 " + saved + " 行")
+                    BotLog.add("已导出 " + saved + " 行到 " + where)
+                } else {
+                    toast("导出失败：" + err)
+                    BotLog.add("[!] 导出失败：" + err)
+                }
+            }
+        }.start()
+    }
+
+    /** ⑧ 复制日志：同样的内容进剪贴板，读文件照样放后台线程。 */
+    private fun copyLog() {
+        Thread {
+            val text = try {
+                readLog()
+            } catch (_: Throwable) {
+                ""
+            }
+            handler.post {
+                if (text.isEmpty()) {
+                    toast("还没有日志")
+                    return@post
+                }
+                try {
+                    getSystemService(android.content.ClipboardManager::class.java)
+                        .setPrimaryClip(android.content.ClipData.newPlainText("bqyw-log", text))
+                } catch (e: Throwable) {
+                    val msg = e.message ?: e.javaClass.simpleName
+                    toast("复制失败：" + msg)
+                    BotLog.add("[!] 复制失败：" + msg)
+                    return@post
+                }
+                val n = text.lineSequence().count { it.isNotEmpty() }
+                toast("已复制 " + n + " 行")
+                BotLog.add("已复制 " + n + " 行（" + kb(text) + " KB）")
+            }
+        }.start()
+    }
+
+    /** 有这次运行的文件就读文件（全文），没开跑就用面板 buffer 兜底。 */
+    private fun readLog(): String {
+        val f = BotLog.runFile()
+        if (f != null && f.exists()) {
+            try {
+                return f.readText()
+            } catch (_: Throwable) {
+                // 读不出来就退回面板，别让导出直接失败
+            }
+        }
+        return BotLog.panelText()
+    }
+
+    /** SAF 只给了 uri，文件名得问系统要。 */
+    private fun displayName(uri: android.net.Uri): String = try {
+        contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (i >= 0 && c.moveToFirst()) c.getString(i) else null
+        } ?: uri.lastPathSegment ?: "导出文件"
+    } catch (_: Throwable) {
+        uri.lastPathSegment ?: "导出文件"
+    }
+
+    /** 文本大小，KB、留一位小数。 */
+    private fun kb(text: String): String =
+        String.format(Locale.US, "%.1f", text.toByteArray().size / 1024.0)
+
+    private fun toast(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -214,6 +336,15 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_EXPORT) {
+            val uri = data?.data
+            if (resultCode != RESULT_OK || uri == null) {
+                BotLog.add("取消导出")
+                return
+            }
+            exportTo(uri)
+            return
+        }
         if (requestCode != REQ_CAPTURE) return
         if (resultCode != RESULT_OK || data == null) {
             BotLog.add("授权：抓屏（MediaProjection） 已取消")
@@ -237,6 +368,7 @@ class MainActivity : Activity() {
         const val REQ_CAPTURE = 1
         const val REQ_NOTIF = 2
         const val REQ_SHIZUKU = 3
+        const val REQ_EXPORT = 4
         const val GAME_PKG = "com.hypergryph.endfield"
         const val GAME_ACTIVITY = "com.u8.sdk.U8UnityContext"
     }

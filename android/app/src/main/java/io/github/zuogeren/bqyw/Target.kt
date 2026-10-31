@@ -155,7 +155,7 @@ class MultiTarget(pool: List<TargetBase>) : TargetBase {
         require(this.targets.size >= 2) { "多目标至少要两个" }
     }
 
-    /** 抽得最多的那个决定最多抽几张（只要前几张的自定义目标不能连点铺满）。 */
+    /** 抽得最多的那个决定最多抽几张（自定义目标可以只要前几张，按它自己的张数算）。 */
     override val stopCount: Int get() = targets.maxOf { it.stopCount }
 
     /** 多目标本身不参与易碎判断，碎不碎要看拆开的每个目标。 */
