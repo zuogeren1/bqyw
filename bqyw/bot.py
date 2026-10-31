@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import actions, geometry as G, privilege
+from . import actions, geometry as G, privilege, screen as screenmod
 from .deck import MAX_DRAWS
 from .rules import (HAND_NAME_CN, MULT, Hand, all_hands, best_hand, score)
 from .targets import HandTarget, TargetBase
@@ -21,6 +21,12 @@ from .vision import (TemplateSet, card_band, count_cards_band, draw_btn_ready,
 
 MEM_REPORT_SECONDS = 300        # 每隔这么久往日志里写一行内存
 MAX_HISTORY = 200               # 战绩里最多留几手牌（不参与判定，只供回头查）
+
+# 游戏抽牌有冷却：实测 5 张最快 6 秒，也就是一张约 1.2 秒；冷却期的点击会被直接丢掉。
+CLICK_GUARD = 1.15      # 两次点击之间至少隔这么久
+EARLY_CLICK = 0.45      # 距上次点击超过这么久、且按钮亮着，就提前点
+DRAW_WINDOW = 6.0       # 一次抽牌最多折腾这么久（≈5 张的冷却总量）
+ROUND_WAIT = 1.5        # 放弃之后等牌面清空的上限
 
 
 class Abort(Exception):
@@ -85,10 +91,13 @@ def modal_open(frame: np.ndarray) -> bool:
 @dataclass
 class Stats:
     attempts: int = 0
-    draws: int = 0
+    draws: int = 0               # 真正翻出来的牌数（不是点击次数）
+    clicks: int = 0              # 点了几下「抽牌」
+    forfeits: int = 0
     best_seen: Hand = Hand.HIGH
     best_score: int = 0
     mismatch: int = 0
+    gaps: list = field(default_factory=list)      # 相邻两张牌的间隔（秒）
     history: list = field(default_factory=list)
 
 
@@ -126,6 +135,12 @@ class Bot:
         self._armed = False          # 本轮的「重开次数」已经记过账了没
         self._mem_at = 0.0           # 上次往日志里写内存的时间
         self._mem_last: tuple[float, float] | None = None
+        self._last_card_at = 0.0     # 上一张牌出现的时间（算出牌间隔）
+        self._forfeit_fail = 0       # 连续几次没点开放弃弹窗
+        self._fresh_round = False    # 刚放弃完：下一圈先等牌清空，再直接点第一张
+        self._t = {"wait_btn": 0.0, "click": 0.0, "card": 0.0,
+                   "read": 0.0, "forfeit": 0.0}
+        self._t_logged = 0
 
     # ---------------------------------------------------------- 小工具
     def log(self, msg: str):
@@ -189,18 +204,18 @@ class Bot:
     def frame(self):
         return self.cap.wait_stable()
 
-    def read_state(self, expect=None, tries: int = 4, gap: float = 0.03):
+    def read_state(self, expect=None, tries: int = 3, gap: float = 0.015):
         """又快又稳地读一帧。
 
         实测翻牌动画约 1.3s，动画中途也能扫到数字残影，所以不能只读一次；
         但也不需要"整屏稳定"，那等于白等动画播完——连续两帧读数一致就够。
 
-        expect 传入上一次的结果：如果这一帧和它一致就直接返回，
-        省掉第二次采样（刚 wait 完的那一轮状态必然没变，这一步能省 2/3 的读取开销）。
+        expect 传入上一次的结果（最好是刚抽到的那手牌）：一致就直接返回，
+        省掉第二次采样。整屏只抓一次，认牌只转卡头条带那块灰度。
         """
         prev = (tuple((c.point, c.suit) for c in expect) if expect is not None else None)
         frame = self.cap.grab()
-        cards = self.ts.read_hand(frame)
+        cards = self.hand_of(frame)
         for _ in range(tries):
             key = tuple((c.point, c.suit) for c in cards)
             if key == prev:
@@ -208,8 +223,17 @@ class Bot:
             prev = key
             time.sleep(gap)
             frame = self.cap.grab()
-            cards = self.ts.read_hand(frame)
+            cards = self.hand_of(frame)
         return frame, cards
+
+    def hand_of(self, frame) -> list:
+        """从整屏里只裁卡头条带认牌。
+
+        整帧转灰度是 3.7MB / 38ms，这条带子只有 700KB / 17ms —— 每次读牌都要走，
+        差的就是每张牌 20ms。
+        """
+        x1, y1, x2, y2 = card_band()
+        return self.ts.read_hand(frame[y1:y2, x1:x2], ox=x1, oy=y1)
 
     def hand_now(self) -> list:
         """只抓卡头条带读手牌。
@@ -236,47 +260,86 @@ class Bot:
             time.sleep(0.05)
         return self.hand_now()
 
-    def wait_draw_ready(self, timeout: float = 2.5) -> bool:
-        """等「抽牌」按钮从冷却里恢复（按钮变亮），最多等 timeout 秒。
-
-        只看按钮那一小块（200×90）：以前每 40ms 抓一次整屏，光等按钮就能
-        白扔掉几百 MB 的临时分配。
-        """
+    def btn_lit(self) -> bool:
+        """「抽牌」按钮现在是不是亮的。只看按钮那一小块（200×90），约 8ms。"""
         x1, y1, x2, y2 = draw_btn_region()
+        return draw_btn_ready(self.cap.grab_region(x1, y1, x2, y2))
+
+    def wait_draw_ready(self, timeout: float = 2.5) -> bool:
+        """等按钮亮。**只是辅助信号** —— 实测它两个方向都会骗人：
+        亮着也可能点空，暗着也可能一点就出牌，所以别拿它当硬门。
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if draw_btn_ready(self.cap.grab_region(x1, y1, x2, y2)):
+            if self.btn_lit():
                 return True
             if self.stopped():
                 return False
-            time.sleep(0.04)
+            time.sleep(0.015)
         return False
 
-    def draw(self, before: int, timeout: float = 2.5) -> int:
-        """点一次抽牌并等新牌翻出来；没翻出来就强制抬起鼠标并记账。"""
-        if not self.wait_draw_ready():
-            self.log("   [!] 抽牌按钮一直没恢复可用，稍后再试")
-        self.act(G.BTN_DRAW, "抽牌")
-        self.stats.draws += 1
-        cards = self.wait_cards(before + 1, timeout=timeout)
-        if len(cards) > before:
-            self._draw_fail = 0
-            return len(cards)
+    def note_card(self, cards, before: int) -> None:
+        """记一张新牌：张数、出牌间隔、失败计数。"""
+        now = time.time()
+        self.stats.draws += max(0, len(cards) - before)
+        if self._last_card_at:
+            self.stats.gaps.append(now - self._last_card_at)
+            if len(self.stats.gaps) > 500:
+                del self.stats.gaps[:-500]
+        self._last_card_at = now
+        self._draw_fail = 0
 
-        if self.dry_run:
-            return before          # 只读模式本来就不会翻牌，别当成故障
+    def draw(self, before: int, window: float = DRAW_WINDOW) -> list:
+        """按冷却节拍点「抽牌」，直到手牌比 before 多一张。
+
+        游戏一张牌约 1.2 秒冷却（5 张最快 6 秒），冷却期的点击会被直接丢掉。
+        所以不能"点一下干等 2.5 秒"，也不能只信按钮视觉：
+          * 距上次点击满 CLICK_GUARD 就再点一次（贴着冷却走）
+          * 按钮亮着且已过 EARLY_CLICK 就提前点（能抢就抢）
+          * 整个 draw 最多折腾 window 秒，到点还没出牌才算一次失败
+
+        返回读到的手牌本身（不是张数）—— 主循环拿它当下一次的 expect，
+        这样下一帧只需抓一次整屏就能确认，不用再"复查一遍稳定性"。
+        """
+        deadline = time.time() + window
+        clicked_at = 0.0
+        while time.time() < deadline and not self.stopped():
+            if clicked_at == 0.0 and not self.btn_lit():
+                # 第一次点：开局过场里按钮常是暗的，先给它 0.5 秒
+                t0 = time.time()
+                self.wait_draw_ready(0.5)
+                self._t["wait_btn"] += time.time() - t0
+            gap = time.time() - clicked_at
+            if (clicked_at == 0.0 or gap >= CLICK_GUARD
+                    or (gap >= EARLY_CLICK and self.btn_lit())):
+                t0 = time.time()
+                self.act(G.BTN_DRAW, "抽牌")
+                self.stats.clicks += 1
+                self._t["click"] += time.time() - t0
+                clicked_at = time.time()
+
+            if self.dry_run:
+                time.sleep(0.4)          # 只读模式不会真翻牌，别在这耗满 6 秒
+                return self.hand_now()
+
+            cards = self.hand_now()
+            if len(cards) > before:
+                self._t["card"] += time.time() - clicked_at
+                self.note_card(cards, before)
+                return cards
+            time.sleep(0.02)
+
         if self.stopped():
-            return before          # 急停打断了这一次，不是抽牌失败
+            return self.hand_now()      # 急停打断了这一次，不是抽牌失败
         self._draw_fail += 1
         actions.release_stuck()
-        self.log(f"   [!] 抽牌后没有翻出新牌（连续第 {self._draw_fail} 次）"
+        self.log(f"   [!] {window:.0f}s 内没翻出新牌（连续第 {self._draw_fail} 次）"
                  f"，已强制抬起鼠标左键")
         if self._draw_fail >= 2:
             raise Abort(
                 "抽牌连续没反应。常见原因：鼠标左键卡在按下状态，"
                 "或游戏窗口没真正接收合成点击。已停止，请手动点一下游戏再重开。")
-        time.sleep(0.3)
-        return before
+        return self.hand_now()
 
     def draw_burst(self, seconds: float = 6.0, want: int = MAX_DRAWS) -> list:
         """快速模式：对着抽牌按钮**连续狂点**固定时长，最后统一扫一次。
@@ -350,9 +413,10 @@ class Bot:
         self.act(G.MODAL_CONFIRM, "确认放弃")
         self.wait_board_clear()
 
-    def forfeit(self, timeout: float = 2.0, wait_clear: bool = True) -> None:
+    def forfeit(self, timeout: float = 1.5, wait_clear: bool = True) -> bool:
         """放弃挑战 → 确认 → （可选）等清空，一把做完，不来回过主循环。
 
+        返回 False 表示确认弹窗没出来（这一下多半点空了）。
         快速模式下 wait_clear=False：清空动画交给下一步的连点去吃掉，
         过渡期的几次点击游戏会直接丢弃，不影响结果，白白省下 0.28 秒。
         """
@@ -365,8 +429,14 @@ class Bot:
             if self.modal_visible():
                 break
             if self.stopped():
-                return
+                return False
             time.sleep(0.008)
+        else:
+            # 没等到弹窗就别对着桌面点「确认」：那个坐标落在牌桌上，
+            # 点到什么全凭运气。让主循环重读一帧再来一次。
+            self._t["forfeit"] += time.time() - t0
+            self.log("   [!] 没等到放弃确认弹窗，这一下可能点空了")
+            return False
         t2 = time.time()
         # 黄色按钮刚显现时命不中：等动画落位再点，否则这一下会被吞掉，
         # 只能靠主循环补救 —— 那一下要多花 1.5 秒，远不如等这 60ms。
@@ -377,6 +447,8 @@ class Bot:
             self.wait_board_clear()
         t4 = time.time()
         self._last_cards = []
+        self.stats.forfeits += 1
+        self._t["forfeit"] += t4 - t0
         if not wait_clear:
             # 快速模式没等清空：接下来一两帧是淡出动画，结构自检必然误判，先放行
             self._grace = 2
@@ -384,6 +456,43 @@ class Bot:
             self.log(f"   （放弃 {t4 - t0:.2f}s = 点击 {t1 - t0:.2f}"
                      f" + 等弹窗 {t2 - t1:.2f} + 确认 {t3 - t2:.2f}"
                      f" + 等清空 {t4 - t3:.2f}）")
+        return True
+
+    def round_is_one(self, tries: int = 2) -> bool:
+        """放弃前的轮次复核：连续读到「1」才算数。
+
+        第二轮里「放弃挑战」等于退出整场演算，读错一次代价太大，
+        宁可多花 20ms 抓两下小框。
+        """
+        b = G.ROUND_NUM
+        for _ in range(tries):
+            patch = self.cap.grab_region(b.x1, b.y1, b.x2, b.y2)
+            if self.ts.read_round_patch(patch) != 1:
+                return False
+            time.sleep(0.02)
+        return True
+
+    def read_round_now(self):
+        """只抓轮次那个小框读数字（复核用）。"""
+        b = G.ROUND_NUM
+        return self.ts.read_round_patch(self.cap.grab_region(b.x1, b.y1, b.x2, b.y2))
+
+    def drop_round(self) -> str:
+        """放弃这一轮。返回 "ok" / "retry"（这一下点空了）/ "stop"（复核没过）。"""
+        if self.ts.rounds and not self.round_is_one():
+            self.log("\n[!] 轮次复核没读到「第 1 轮」：第二轮放弃会结束整场演算，已停止。")
+            self.stop_reason = "round_unknown"
+            return "stop"
+        if self.forfeit() is False:
+            self._forfeit_fail += 1
+            if self._forfeit_fail >= 3:
+                self.log("\n[!] 连续 3 次都没能放弃成功（点不到「放弃挑战」？），已停止。")
+                self.stop_reason = "forfeit_fail"
+                return "stop"
+            return "retry"
+        self._forfeit_fail = 0
+        self._fresh_round = True
+        return "ok"
 
     # ---------------------------------------------------------- 轮次记账
     def new_round(self) -> bool:
@@ -415,13 +524,31 @@ class Bot:
     def pace(self) -> str:
         seconds = max(0.0, time.time() - self.t0)
         n = max(1, self.stats.attempts)
+        cards = self.stats.draws
         base = (f"用时 {seconds:.0f}s，{self.stats.attempts} 轮，"
-                f"平均 {seconds / n:.1f}s/轮，{self.stats.draws} 次抽牌")
-        if self.stats.attempts and not self.fast_mode:
-            base += f"，{seconds / max(1, self.stats.draws):.2f}s/抽"
+                f"平均 {seconds / n:.1f}s/轮，{cards} 张牌")
+        if cards:
+            # 按"真翻出来的牌"算，不按点击次数 —— 冷却期点空的那些不该算战绩
+            base += f"，{seconds / cards:.2f}s/张"
+            if self.stats.clicks:
+                base += f"（点击 {self.stats.clicks / cards:.2f} 次/张）"
+            gaps = sorted(self.stats.gaps[-200:])
+            if gaps:
+                base += f"，出牌间隔中位 {gaps[len(gaps) // 2]:.2f}s"
         if self.stats.mismatch:
             base += f"（表格抢跑 {self.stats.mismatch} 次，属正常）"
         return base
+
+    def log_timing(self) -> None:
+        """把各段耗时摊到每张牌上写一行：用来判断下一步该削哪一段。"""
+        cards = max(1, self.stats.draws)
+        rounds = max(1, self.stats.attempts)
+        t = self._t
+        self.log(
+            f"[节奏] {self.stats.draws} 张 / {self.stats.attempts} 轮："
+            f"等按钮 {t['wait_btn'] / cards:.2f}s/张，点击 {t['click'] / cards:.2f}，"
+            f"等牌 {t['card'] / cards:.2f}，读牌 {t['read'] / cards:.2f}，"
+            f"放弃 {t['forfeit'] / rounds:.2f}s/轮")
 
     def _on_hotkey(self):
         if not self.stop_flag.is_set():
@@ -452,6 +579,8 @@ class Bot:
         try:
             return self._run()
         finally:
+            if self.stats.draws:
+                self.log_timing()
             if self._hot is not None:
                 self._hot.stop()
 
@@ -478,7 +607,7 @@ class Bot:
             self.stop_reason = "bad_resolution"
             return self.stop_reason
         w, h = self.cap.frame_size()
-        self.log(f"画面 {w}×{h}，坐标缩放 {s:.3f}"
+        self.log(f"画面 {w}×{h}（{screenmod.aspect(w, h)}），坐标缩放 {s:.3f}"
                  + ("（基准分辨率）" if abs(s - 1.0) < 1e-6 else ""))
 
         # 提权自检：游戏多为提权启动，UIPI 会静默丢弃低权限进程的点击
@@ -517,6 +646,20 @@ class Bot:
                 self.log("已按你的要求停止。")
                 return self.stop_reason
             self._mem_tick()
+            if self.stats.attempts >= self._t_logged + 20:
+                self._t_logged = self.stats.attempts
+                self.log_timing()
+            if self._fresh_round:
+                # 刚放弃完：等牌面清空就直接点第一张，不再多抓一帧整屏去确认空桌
+                self._fresh_round = False
+                if not self.wait_board_clear(timeout=ROUND_WAIT):
+                    self.log("   [!] 放弃之后牌面一直没清空，重来一次")
+                    time.sleep(0.3)
+                    continue
+                if not self.new_round():
+                    return self._stop_max_attempts()
+                self._last_cards = self.draw(0)
+                continue
             if self._grace > 0:
                 # 刚放弃完，屏幕还在淡出：等画面稳住再读，跳过弹窗/结构判定
                 self._grace -= 1
@@ -531,7 +674,9 @@ class Bot:
                     self.dismiss_modal()
                     continue
 
+                t_read = time.time()
                 frame, cards = self.read_state(expect=self._last_cards)
+                self._t["read"] += time.time() - t_read
 
             # 画面自检：挡住/最小化/不在抽牌页时，宁可停下也不瞎点
             if not looks_like_draw_screen(frame):
@@ -546,6 +691,11 @@ class Bot:
                 time.sleep(0.25)
                 continue
             bad_frames = 0
+            if cards and len(cards) < len(self._last_cards):
+                # 手牌只会变多：变少一定是读错了（漏读一张就可能把好牌弃掉），重读一帧
+                t_read = time.time()
+                frame, cards = self.read_state(expect=None, tries=1)
+                self._t["read"] += time.time() - t_read
             self._last_cards = cards
 
             # 交叉校验（只统计，不拦路）：表格高亮在换数时会滚动，比手牌慢半拍，
@@ -563,8 +713,8 @@ class Bot:
             if rnd is None:
                 # 淡出/翻牌动画里轮次数字可能读不出，别急着当成"第二轮"停下
                 for _ in range(4):
-                    time.sleep(0.05)
-                    rnd = self.ts.read_round(self.cap.grab())
+                    time.sleep(0.03)
+                    rnd = self.read_round_now()
                     if rnd is not None:
                         break
             self.emit(round=rnd, count=n, cards=cards,
@@ -609,7 +759,7 @@ class Bot:
                     # 快速模式：别先单抽一张白等 2 秒，直接开连点
                     self.draw_burst(self.fast_seconds, MAX_DRAWS)
                     continue
-                self.draw(0)
+                self._last_cards = self.draw(0)
                 continue
 
             # ---- 有牌：判断还要不要继续
@@ -626,14 +776,19 @@ class Bot:
             # 战力点上限：超过就注定打不动，直接重开，别浪费时间
             if self.max_bp and sum(c.point for c in cards) > self.max_bp:
                 self.log(f"     战力点 {sum(c.point for c in cards)} > 上限 {self.max_bp}，放弃")
-                self.forfeit()
+                if self.drop_round() == "stop":
+                    return self.stop_reason
                 continue
 
             if left <= 0:
                 # 连点只适合「铺满 5 张」的目标：只要前几张时多抽一张就不是这个目标了，
                 # 手牌变 5 张跟目标长度对不上，一轮也中不了，只会无休止地放弃+连点
                 burst = self.fast_mode and stop >= MAX_DRAWS
-                self.forfeit(wait_clear=not burst)
+                if not burst:
+                    if self.drop_round() == "stop":
+                        return self.stop_reason
+                    continue
+                self.forfeit(wait_clear=False)
                 if burst and not self.stopped():
                     # 确认之后不用等淡出/清空动画，直接开下一轮连点：
                     # 抽牌按钮就算被动画挡着也照样吃点击，过渡期丢掉几下无所谓。
@@ -653,10 +808,12 @@ class Bot:
 
             if not self.target.possible(cards, left):
                 self.log(f"     {self.target} 已不可能，提前放弃")
-                self.forfeit()
+                if self.drop_round() == "stop":
+                    return self.stop_reason
                 continue
 
-            self.draw(n)
+            # 把刚抽到的手牌交给下一轮 read_state 当 expect：下一帧只需抓一次整屏
+            self._last_cards = self.draw(n)
 
     @staticmethod
     def _beep():

@@ -7,6 +7,7 @@
 """
 import os
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -67,10 +68,13 @@ class FakeTS:
     def __init__(self, table):
         self.table = table
 
-    def read_hand(self, frame):
+    def read_hand(self, frame, ox=0, oy=0):
         return list(self.table.cards)
 
     def read_round(self, frame):
+        return 1
+
+    def read_round_patch(self, patch, min_score=0.55):
         return 1
 
 
@@ -109,11 +113,12 @@ def make_bot(table, *, fast=True, max_attempts=0, stub_burst=True,
     b.read_state = lambda expect=None, tries=4, gap=0.03: (None, list(table.cards))
     b.act = lambda box, what: None
 
-    def fake_forfeit(timeout=2.0, wait_clear=True):
+    def fake_forfeit(timeout=1.5, wait_clear=True):
         table.forfeits += 1
         if table.forfeits > 200:
             raise AssertionError("放弃次数失控，主循环没在记账")
         table.cards = []
+        return True
 
     b.forfeit = fake_forfeit
 
@@ -126,12 +131,12 @@ def make_bot(table, *, fast=True, max_attempts=0, stub_burst=True,
             return list(table.cards)
         b.draw_burst = fake_burst
 
-    def fake_draw(before, timeout=2.5):
+    def fake_draw(before, window=6.0):
         table.draws += 1
         if table.draws > 500:
             raise AssertionError("单抽次数失控")
         table.cards.append(table.next_card())
-        return len(table.cards)
+        return list(table.cards)
     b.draw = fake_draw
     return b, logs
 
@@ -224,6 +229,70 @@ def main():
         check("连点返回手牌", len(cards), 5)
         check("连点记账=真牌数", b4.stats.draws, 5)
         check("连点确实点了很多下", len(clicks) > 5, True)
+        # ------------------------------------------------ 节拍器：点了就出牌就收工
+        t8 = Table([MISS])
+        b8 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
+                   fast_mode=False, dry_run=False, verbose=False, logger=lambda s: None)
+        b8.hotkey = ""
+        b8.ts = FakeTS(t8)
+        b8.act = lambda box, what: t8.cards.append(t8.next_card())
+        b8.btn_lit = lambda: True
+        got = b8.draw(0)
+        check("节拍器 出牌张数", len(got), 1)
+        check("节拍器 记账按牌算", b8.stats.draws, 1)
+        check("节拍器 只点一次", b8.stats.clicks, 1)
+
+        # -------------------------- 冷却模拟：点是点空的，但节拍器必须自己补回来
+        class CooldownTable(Table):
+            def __init__(self, hands):
+                super().__init__(hands)
+                self.last_accept = 0.0
+                self.accepted = 0
+
+            def click(self, cooldown=1.1):
+                if time.time() - self.last_accept < cooldown:
+                    return                      # 冷却期：游戏直接丢掉
+                self.last_accept = time.time()
+                self.accepted += 1
+                self.cards.append(self.next_card())
+
+        t11 = CooldownTable([MISS])
+        b11 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
+                    fast_mode=False, dry_run=False, verbose=False, logger=lambda s: None)
+        b11.hotkey = ""
+        b11.ts = FakeTS(t11)
+        b11.btn_lit = lambda: True
+        b11.act = lambda box, what: t11.click()
+        t0 = time.time()
+        got = b11.draw(0)                       # 第一下就该成
+        check("冷却 第一张出牌", len(got), 1)
+        got2 = b11.draw(1)                      # 第二下必然撞冷却，靠节拍器补
+        used = time.time() - t0
+        check("冷却 第二张也出牌", len(got2), 2)
+        check("冷却 补点后只成功一次", t11.accepted, 2)
+        check("冷却 没死等满 6 秒", used < 3.0, True)
+
+        # ------------------------------------------------ 放弃前的轮次复核
+        class BadRound(FakeTS):
+            def read_round_patch(self, patch, min_score=0.55):
+                return 2
+
+        t9 = Table([MISS])
+        b9, _ = make_bot(t9, fast=False, max_attempts=1)
+        b9.ts = BadRound(t9)
+        check("轮次复核没过 不放弃", b9.drop_round(), "stop")
+        check("轮次复核没过 停因", b9.stop_reason, "round_unknown")
+        check("轮次复核没过 真没放弃", t9.forfeits, 0)
+
+        # 放弃点空了应该重试，而不是直接算放弃成功
+        t10 = Table([MISS])
+        b10, _ = make_bot(t10, fast=False, max_attempts=1)
+        b10.forfeit = lambda timeout=1.5, wait_clear=True: False
+        check("放弃没点到 先重试", b10.drop_round(), "retry")
+        b10.drop_round()
+        check("连续点空 第 3 次停手", b10.drop_round(), "stop")
+        check("连续点空 停因", b10.stop_reason, "forfeit_fail")
+
     finally:
         B.looks_like_draw_screen = real_screen
         B.find_highlight = real_find

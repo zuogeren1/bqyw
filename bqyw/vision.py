@@ -165,15 +165,11 @@ class TemplateSet:
         suit, _ = self.classify_suit(gink)
         return Card(point, suit), pscore
 
-    def read_round(self, frame: np.ndarray, min_score: float = 0.55) -> int | None:
-        """读「当前轮次」里的那个数字：1 或 2。第二轮不能放弃重开，必须靠它判断。"""
-        if not self.rounds:
+    def read_round_patch(self, patch: np.ndarray, min_score: float = 0.55) -> int | None:
+        """已经裁到「轮次数字」那个小框时的版本（复核轮次用，8ms 抓一次就够）。"""
+        if not self.rounds or patch is None or patch.size == 0:
             return None
-        b = G.ROUND_NUM
-        # 先裁再转灰度：这个框只有 54×42，没必要为它把整帧 2560×1440 转一遍
-        crop = frame[b.y1:b.y2, b.x1:b.x2]
-        if crop.size == 0:
-            return None
+        crop = patch
         if crop.ndim == 3:
             crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         best, best_score = None, -1.0
@@ -186,6 +182,14 @@ class TemplateSet:
             if score > best_score:
                 best, best_score = rnd, score
         return best if best_score >= min_score else None
+
+    def read_round(self, frame: np.ndarray, min_score: float = 0.55) -> int | None:
+        """读「当前轮次」里的那个数字：1 或 2。第二轮不能放弃重开，必须靠它判断。"""
+        if not self.rounds:
+            return None
+        b = G.ROUND_NUM
+        # 先裁再转灰度：这个框只有 54×42，没必要为它把整帧 2560×1440 转一遍
+        return self.read_round_patch(frame[b.y1:b.y2, b.x1:b.x2], min_score)
 
     def read_hand(self, frame: np.ndarray, ox: int = 0, oy: int = 0) -> list[Card]:
         """读手牌。frame 可以是整屏，也可以只是 card_band() 那条；后者要带 ox/oy。
