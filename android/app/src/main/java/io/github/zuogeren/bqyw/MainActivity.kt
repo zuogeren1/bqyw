@@ -60,7 +60,7 @@ class MainActivity : Activity() {
             gravity = Gravity.TOP
         }
         root.addView(TextView(this).apply {
-            text = "目标在悬浮球里设置：进游戏后点悬浮球 → 牌型 / 点数 → 开始"
+            text = "目标在悬浮球里设置：进游戏后点悬浮球 → 牌型 / 自定义（可多选）→ 开始"
             textSize = 14f
             setPadding(0, 0, 0, dp(2))
         })

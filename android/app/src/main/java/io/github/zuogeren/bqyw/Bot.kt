@@ -9,11 +9,19 @@ import android.graphics.Bitmap
  */
 class Bot(
     private val engine: Engine,
-    private val target: Target,
+    private val target: TargetBase,
     private val maxAttempts: Int,
     private val fast: Boolean = false,
     private val log: (String) -> Unit,
 ) {
+
+    /**
+     * 能不能「连点铺满 5 张」。
+     *
+     * 自定义目标只要前几张时（「不抽」），多抽一张就不是这个目标了，
+     * 所以哪怕开了快速模式也只能一张一张来。
+     */
+    private val burstMode = fast && target.stopCount >= Target.MAX_DRAWS
 
     interface Engine {
         fun frame(): Bitmap?
@@ -99,7 +107,26 @@ class Bot(
                 sleep(120)
                 continue
             }
-            if (filled < 5) {
+            // 目标判定只认「已经抽到的牌」。
+            // CardReader 永远给 5 格，没翻开的是 Card(0, 0)；空位混进判定里会被当成真的
+            // 0 点牌：3 个空位能让 Hands 判出三条、4 张同花因为空位花色不同永远判不出来、
+            // 张数固定的自定义目标也永远对不上。所以这里切一份只含已抽牌的手牌。
+            val drawn = cards.take(filled)
+            // 中间有张牌没认出来时，drawn 里会夹着空位；这种残缺手牌不拿去做判定，
+            // 否则「还有戏」会被误判成「已不可能」，白白放弃一轮
+            val intact = drawn.none { it.point == 0 }
+            // 自定义目标可能只要前几张（「不抽」），牌型目标一律 5 张
+            val stop = target.stopCount
+            val left = (stop - filled).coerceAtLeast(0)
+            // 易碎目标凑到手就得收：这会儿牌还没铺满，但再抽一张（同花 / 自定义）就没了。
+            // 单个牌型不走这条路，还是抽满 5 张再判，免得改了原来的手感。
+            if (intact && filled in 1 until stop && target.shouldStop(drawn, left)) {
+                log("提前收手，命中 " + target + "：" + pts.joinToString(" ") +
+                    "，预估奖励点 " + Hands.score(drawn))
+                engine.beep()
+                return "hit"
+            }
+            if (filled < stop) {
                 if (filled == 0) {
                     idle++
                     lastFilled = 0
@@ -122,16 +149,15 @@ class Bot(
                     }
                     lastFilled = filled
                     // 提前剪枝：剩下这几抽怎么都凑不出目标了，直接重开，别浪费时间
-                    // （快速模式刻意不做，用剪枝换吞吐）
-                    val prefix = cards.takeWhile { it.point > 0 }
-                    if (!fast && prefix.size == filled && !target.possible(prefix, 5 - filled)) {
+                    // （连点铺满的快速模式刻意不做，用剪枝换吞吐）
+                    if (!burstMode && intact && !target.possible(drawn, left)) {
                         log("  " + target + " 已不可能（" + filled + " 张），提前放弃")
                         forfeit()
                         calmUntil = System.currentTimeMillis() + 1500
                         continue
                     }
                 }
-                if (fast) {
+                if (burstMode) {
                     burst()
                 } else {
                     val p = Geom.tapDraw()
@@ -153,14 +179,15 @@ class Bot(
             lastHand = handKey
             lastHandAt = now
             attempts++
-            val hand = Hands.best(cards)
+            // 短自定义目标命中时手上还不到 5 张，牌型也只能按实际抽到的牌算
+            val hand = Hands.best(drawn)
             log(
                 "第 " + attempts + " 轮：" + pts.joinToString(" ") +
                     "  " + hand.cn + " ×" + hand.mult +
                     "  总战力 " + pts.sum(),
             )
-            if (target.matches(cards)) {
-                log("命中 " + target + "，预估奖励点 " + Hands.score(cards))
+            if (intact && target.matches(drawn, left)) {
+                log("命中 " + target + "，预估奖励点 " + Hands.score(drawn))
                 engine.beep()
                 return "hit"
             }
@@ -168,7 +195,7 @@ class Bot(
                 log("达到重开上限 " + maxAttempts + "，停止")
                 return "max"
             }
-            if (fast) {
+            if (burstMode) {
                 // 快速模式：确认完直接开下一轮连点，不读牌也不等淡出
                 forfeitFast()
                 burst()

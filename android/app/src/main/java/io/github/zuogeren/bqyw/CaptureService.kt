@@ -65,13 +65,18 @@ class CaptureService : Service() {
 
     fun hasProjection(): Boolean = reader != null
 
+    /**
+     * 悬浮球点「开始」。
+     *
+     * [specs] 是每组自定义目标的牌面写法（一行一组），[handNames] 是勾上的标准牌型
+     * （Hand.name）。两样可以同时有：达成其中任意一个就停手，优先级由 Targets.combine 排。
+     */
     fun startBotFromUi(
-        spec: String,
-        maxAttempts: Int,
-        hand: String? = null,
+        specs: List<String>,
+        handNames: List<String>,
         ordered: Boolean = false,
         fast: Boolean = false,
-    ) = startBot(spec, maxAttempts, hand, ordered, fast)
+    ) = startBot(specs, handNames, 0, ordered, fast)
 
     fun stopBotFromUi() = stopBot()
 
@@ -100,10 +105,15 @@ class CaptureService : Service() {
 
         when (intent?.action) {
             ACTION_START_BOT -> {
+                // 走 Intent 的老路子一次只能给一个目标（一项自定义或一个牌型）
                 startBot(
-                    intent.getStringExtra(EXTRA_TARGET) ?: "",
+                    listOfNotNull(
+                        intent.getStringExtra(EXTRA_TARGET)?.takeIf { it.isNotBlank() }
+                    ),
+                    listOfNotNull(
+                        intent.getStringExtra(EXTRA_HAND)?.takeIf { it.isNotBlank() }
+                    ),
                     intent.getIntExtra(EXTRA_MAX, 0),
-                    intent.getStringExtra(EXTRA_HAND),
                     intent.getBooleanExtra(EXTRA_ORDERED, false),
                     intent.getBooleanExtra(EXTRA_FAST, false),
                 )
@@ -176,9 +186,9 @@ class CaptureService : Service() {
 
     // ------------------------------------------------------------ 机器人
     private fun startBot(
-        spec: String,
+        specs: List<String>,
+        handNames: List<String>,
         maxAttempts: Int,
-        handName: String? = null,
         ordered: Boolean = false,
         fast: Boolean = false,
     ) {
@@ -190,12 +200,15 @@ class CaptureService : Service() {
             BotLog.add("已经在跑了")
             return
         }
-        val hand = handName?.takeIf { it.isNotBlank() }
-            ?.let { n -> Hand.values().firstOrNull { it.name == n } }
+        // 单个目标还是单个 Target，多选才包成 MultiTarget，组装规则和悬浮球的摘要一致
         val target = try {
-            Target(Targets.parse(spec).wants, hand, ordered)
+            Targets.combine(handNames, specs, ordered)
         } catch (e: Throwable) {
             BotLog.add("目标写法不对：" + (e.message ?: ""))
+            return
+        }
+        if (target == null) {
+            BotLog.add("还没选目标：点悬浮球 → 牌型，勾一个再开始")
             return
         }
 

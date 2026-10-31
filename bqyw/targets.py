@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from .deck import MAX_DRAWS, reachable
-from .rules import (HAND_NAME_CN, POINT_ANY, SUITS, SUIT_UNKNOWN, Card, Hand,
-                    all_hands)
+from .rules import (HAND_NAME_CN, MULT, POINT_ANY, SUITS, SUIT_UNKNOWN, Card,
+                    Hand, all_hands)
 
 ANY = "任意"
 TOKEN_RE = re.compile(r"^(任意|[1-5])(.*)$")
@@ -25,7 +25,12 @@ class TargetBase:
     label = ""
     stop_count = MAX_DRAWS      # 抽到第几张停手；标准牌型一律按 5 张算
 
-    def matches(self, cards: list[Card]) -> bool:
+    # 抽第 6 张（多抽一张）会不会把这个目标弄丢。
+    # 顺子/对子/三条/葫芦/四条 这类「手里存在某个组合」的判定不会，
+    # 同花/同花顺要看「所有牌」，多一张异色就没了。
+    fragile = False
+
+    def matches(self, cards: list[Card], draws_left: int | None = None) -> bool:
         raise NotImplementedError
 
     def possible(self, cards: list[Card], draws_left: int) -> bool:
@@ -42,7 +47,11 @@ class HandTarget(TargetBase):
         self.hand = hand
         self.label = HAND_NAME_CN[hand]
 
-    def matches(self, cards: list[Card]) -> bool:
+    @property
+    def fragile(self) -> bool:
+        return self.hand in (Hand.FLUSH, Hand.STRAIGHT_FLUSH)
+
+    def matches(self, cards: list[Card], draws_left: int | None = None) -> bool:
         return bool(cards) and self.hand in all_hands(cards)
 
     def possible(self, cards: list[Card], draws_left: int) -> bool:
@@ -104,7 +113,11 @@ class CustomTarget(TargetBase):
         return f"自定义({body}{'，按顺序' if self.ordered else ''})"
 
     # ---------------------------------------------------------- 判定
-    def matches(self, cards: list[Card]) -> bool:
+    @property
+    def fragile(self) -> bool:
+        return True                 # 张数固定，多抽一张就不再是这个目标
+
+    def matches(self, cards: list[Card], draws_left: int | None = None) -> bool:
         if len(cards) != len(self.cards):
             return False
         if self.ordered:
@@ -191,12 +204,96 @@ def _ordered_probability(target: "CustomTarget") -> float:
     return f((0,) * len(stock), 0)
 
 
+
+def _desire(t: TargetBase) -> float:
+    """越想要的排越前：标准牌型按基础倍率，自定义排最后。"""
+    if isinstance(t, HandTarget):
+        return MULT[t.hand]
+    return 0.0
+
+
+class MultiTarget(TargetBase):
+    """多选目标：勾几个能接受的牌型，达成其中任意一个就算赢。
+
+    按「越想要越优先」排队（标准牌型按倍率从高到低，自定义垫底）：
+
+      1. 已经凑到手的、容易碎的目标（同花 / 同花顺 / 自定义）→ 立刻收，别把它抽没了
+      2. 从最想要的往下找：
+           · 这个目标成了        → 收
+           · 这个目标还有戏      → 继续抽（搏更好的那个）
+           · 这个目标没戏了      → 看下一个
+      3. 全都没戏了             → 放弃
+
+    典型用法：勾「同花顺 + 顺子」—— 手里 4 张顺子照样抽第 5 张，
+    抽到同花顺最好，抽不到的话顺子还在，收下。
+    """
+
+    def __init__(self, targets, label_sep: str = " / ", reorder: bool = True):
+        uniq: list[TargetBase] = []
+        for t in targets:
+            if not isinstance(t, TargetBase):
+                raise TypeError("目标要是 TargetBase")
+            if t not in uniq:
+                uniq.append(t)
+        if len(uniq) < 2:
+            raise ValueError("多选目标至少要两个")
+        self.targets = sorted(uniq, key=_desire, reverse=True) if reorder else uniq
+        self.label = label_sep.join(str(t) for t in self.targets)
+
+    @property
+    def stop_count(self) -> int:
+        # 要抽得最多的那个决定最多抽几张
+        return max(t.stop_count for t in self.targets)
+
+    def matches(self, cards: list[Card], draws_left: int | None = None) -> bool:
+        if not cards:
+            return False
+        # 1) 易碎的先保住：已经到手的，不为搏更好的去赌
+        for t in self.targets:
+            if t.fragile and t.matches(cards, draws_left):
+                return True
+        # 2) 从最想要的往下找
+        for t in self.targets:
+            if t.matches(cards, draws_left):
+                return True
+            if t.possible(cards, draws_left):
+                return False
+        return False
+
+    def possible(self, cards: list[Card], draws_left: int) -> bool:
+        return any(t.matches(cards, draws_left) or t.possible(cards, draws_left)
+                   for t in self.targets)
+
+    def __eq__(self, other):
+        return isinstance(other, MultiTarget) and other.targets == self.targets
+
+    def __hash__(self):
+        return hash(("multi", tuple(hash(t) for t in self.targets)))
+
+
+class UnionTarget(MultiTarget):
+    """两个目标取其一。等价于勾两个的多选，保留它是为了手感和旧调用。"""
+
+    def __init__(self, primary: TargetBase, fallback: TargetBase):
+        if not isinstance(primary, TargetBase) or not isinstance(fallback, TargetBase):
+            raise TypeError("并集要两个目标对象")
+        if type(primary) is type(fallback) and primary == fallback:
+            raise ValueError("主目标和保底目标不能是同一个")
+        super().__init__([primary, fallback], label_sep=" 或 ", reorder=False)
+        self.primary = primary
+        self.fallback = fallback
+
+
 def estimate_attempts(target: TargetBase) -> float:
     """从空手开始，平均要重开多少次才能达成目标。"""
     from .deck import completion_probability_pred, expected_attempts as _hand_exp
 
     if isinstance(target, HandTarget):
         return _hand_exp(target.hand)
+    if isinstance(target, MultiTarget):
+        p = completion_probability_pred(
+            lambda cards: target.matches(cards, MAX_DRAWS - len(cards)))
+        return 1.0 / p if p > 0 else float("inf")
     if target.ordered:
         p = _ordered_probability(target)
     else:

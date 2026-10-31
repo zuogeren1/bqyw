@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import os
 import sys
 
@@ -29,7 +30,7 @@ from bqyw import __version__  # noqa: E402
 from bqyw.deck import completion_probability, expected_attempts, full_deck  # noqa: E402
 from bqyw.rules import (HAND_NAME_CN, Hand, all_hands, battle_total,  # noqa: E402
                         best_hand, score)
-from bqyw.targets import make_target  # noqa: E402
+from bqyw.targets import MultiTarget, make_target  # noqa: E402
 from bqyw import geometry  # noqa: E402
 from bqyw.vision import TemplateSet, expected_highlight, find_highlight  # noqa: E402
 
@@ -97,6 +98,11 @@ def cmd_run(args):
 
     try:
         target = make_target(args.target, args.custom, args.ordered)
+        extra = getattr(args, "fallback", None)
+        if extra:
+            more = [make_target(x.strip()) for x in re.split(r"[,，/、\s]+", extra) if x.strip()]
+            pool = [target] + more
+            target = MultiTarget(pool) if len(pool) > 1 else target
     except ValueError as exc:
         raise SystemExit(f"目标无效：{exc}")
     lucky = NAME_TO_HAND.get(args.lucky) if args.lucky else None
@@ -188,6 +194,8 @@ def build_parser():
                     help='自定义 1~5 张，如 "3筒 3筒 3索 5萬 5"；'
                          '没写花色=任意，点数写「任意」=不挑点数（可带花色，如 任意筒）')
     pr.add_argument("--ordered", action="store_true", help="自定义目标按抽取顺序严格匹配")
+    pr.add_argument("--fallback", default=None,
+                    help="再加几个能接受的目标，逗号分隔（如 --target 同花顺 --fallback 顺子,同花）")
     pr.add_argument("--lucky", default=None, help="今日好运组合（同花顺/四条/同花/葫芦/顺子/三条/两对/对子）")
     pr.add_argument("--dry", action="store_true", help="只读不动手")
     pr.add_argument("--start", action="store_true", help="命中后自动点开始挑战")

@@ -471,6 +471,8 @@ class Bot:
                     self.stats.mismatch += 1
 
             n = len(cards)
+            stop = self.target.stop_count          # 自定义目标可能只要前几张
+            left = stop - n                        # 还能再抽几张
             rnd = self.ts.read_round(frame) if self.ts.rounds else 1
             if rnd is None:
                 # 淡出/翻牌动画里轮次数字可能读不出，别急着当成"第二轮"停下
@@ -491,7 +493,7 @@ class Bot:
                                             score(cards, self.lucky))
 
             # ---- 命中
-            if cards and self.target.matches(cards):
+            if cards and self.target.matches(cards, left):
                 self.stats.history.append(cards)
                 self.log(f"\n命中 {self.target}："
                          f"{[(c.point, c.suit) for c in cards]}  "
@@ -541,8 +543,6 @@ class Bot:
                 self.forfeit()
                 continue
 
-            stop = self.target.stop_count          # 自定义目标可能只要前几张
-            left = stop - n
             if left <= 0:
                 # 连点只适合「铺满 5 张」的目标：只要前几张时多抽一张就不是这个目标了，
                 # 手牌变 5 张跟目标长度对不上，一轮也中不了，只会无休止地放弃+连点

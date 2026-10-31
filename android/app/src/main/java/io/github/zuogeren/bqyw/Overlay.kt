@@ -13,17 +13,20 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.CheckBox
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 
 /**
  * 悬浮球：游戏里也能操作的主界面。
  *
- * 收起只有一个小球，拖动移动、点一下展开。面板里：
- *  - 牌型（下拉）：不限 / 散牌 / 对子 / … / 同花顺，选了就按牌型判定
- *  - 点数（下拉）：5 个格子，每个可选 任意 / 1~5 / 1~5 带花色
- *  - 开始 / 停止 / 状态
+ * 收起只有一个小球，拖动移动、点一下展开。展开后一次只显示一页：
+ *  - 主面板：当前目标摘要 + 按顺序 / 快速 + 开始 / 停止 / 状态
+ *  - 牌型页：9 个标准牌型 + 自定义，都能多选，达成其中任意一个就停手
+ *  - 自定义页：可以写好几组，每组 1~5 张，达成任意一组就停手
+ *  - 点数页：改某一组里的某一格（点数 / 花色 / 「不抽」）
  *
  * 全部用面板内展开的选项网格，不弹系统下拉框——悬浮窗里弹窗容易抢焦点。
  */
@@ -36,17 +39,31 @@ class Overlay(private val ctx: Context) {
     private var params: WindowManager.LayoutParams? = null
     private var panel: LinearLayout? = null
     private var body: LinearLayout? = null
+    private var scroll: ScrollView? = null
     private var expanded = false
 
-    private val point = intArrayOf(3, 2, 5, 0, 0)
-    private val suit = intArrayOf(0, 0, 0, 0, 0)
-    private var handIdx = 0
+    /** 勾上的标准牌型。多个时按倍率从高到低追求，见 Targets.combine。 */
+    private val handSel = LinkedHashSet<Hand>()
+
+    /** 勾上「自定义」：下面那几组牌面参与判定。 */
+    private var customOn = false
+
+    /** 自定义目标，每组 1~5 张；达成任意一组就停手。 */
+    private val groups = ArrayList<Group>()
+
+    init {
+        // 默认口径跟 1.1.0 保持一致：老版本一打开就是「自定义 3 2 5 任 任」，
+        // 点开始就能跑。改成空的等于每次都要先勾一下，没必要。
+        customOn = true
+        groups.add(Group.legacy())
+    }
+
     private var ordered = false
     private var fast = false
-    private val handOptions: List<Hand?> = listOf(null) + Hand.values().toList()
 
     private var mode = MODE_MAIN
-    private var slotIdx = 0
+    private var editGroup = 0
+    private var editSlot = 0
     private var status: TextView? = null
 
     private val dp: Float get() = ctx.resources.displayMetrics.density
@@ -66,6 +83,29 @@ class Overlay(private val ctx: Context) {
 
         body = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
 
+        // 自定义能写好几组，面板有可能比屏幕还高；套一层可滚动的，
+        // 免得「开始」被挤到屏幕外面点不着（横屏只有 1260px 高）
+        scroll = object : ScrollView(ctx) {
+            override fun onMeasure(w: Int, h: Int) {
+                val dm = ctx.resources.displayMetrics
+                val cap = (dm.heightPixels - px(96)).coerceAtLeast(px(180))
+                super.onMeasure(w, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST))
+            }
+        }.apply {
+            isFillViewport = false
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            addView(
+                body,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+
         panel = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(px(10), px(8), px(10), px(8))
@@ -77,7 +117,7 @@ class Overlay(private val ctx: Context) {
             visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(px(250), LinearLayout.LayoutParams.WRAP_CONTENT)
                 .apply { marginStart = px(8) }
-            addView(body)
+            addView(scroll)
         }
 
         val container = LinearLayout(ctx).apply {
@@ -115,6 +155,7 @@ class Overlay(private val ctx: Context) {
         root = null
         panel = null
         body = null
+        scroll = null
         status = null
     }
 
@@ -122,43 +163,45 @@ class Overlay(private val ctx: Context) {
     private fun render() {
         val b = body ?: return
         b.removeAllViews()
+        // 旧的 status 已经不在面板上了，别再让轮询往它身上写
+        status = null
+        // 换页后面板高度会变，把滚动条退回顶部，不然会停在上一次的偏移上
+        scroll?.scrollTo(0, 0)
         when (mode) {
             MODE_HAND -> renderHandList(b)
+            MODE_GROUPS -> renderGroupList(b)
             MODE_SLOT -> renderSlotList(b)
             else -> renderMain(b)
         }
+        fitOnScreen()
     }
 
     private fun renderMain(b: LinearLayout) {
-        b.addView(label("牌型"))
-        b.addView(button(handText(), wide = true) {
+        b.addView(label("目标（勾几个都行，达成任意一个就停）"))
+        b.addView(button(handButtonText(), wide = true) {
             mode = MODE_HAND
             render()
         })
-
-        b.addView(label("目标点数（每格可选花色）"))
-        val row = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, px(2))
-        }
-        for (i in 0 until 5) {
-            val cell = button(slotText(i), wide = false) {
-                slotIdx = i
-                mode = MODE_SLOT
+        if (customOn) {
+            b.addView(button("编辑自定义（" + groups.size + " 组）", wide = true) {
+                mode = MODE_GROUPS
                 render()
-            }
-            cell.layoutParams = LinearLayout.LayoutParams(px(40), px(36)).apply { marginEnd = px(4) }
-            cell.alpha = if (handOptions[handIdx] != null) 0.35f else 1f
-            row.addView(cell)
+            })
         }
-        b.addView(row)
+
+        // 摘要和真正开跑用的是同一个 Targets.combine，选了什么、按什么顺序追一眼能看到
+        b.addView(summaryView())
 
         val orderBox = CheckBox(ctx).apply {
-            text = "按顺序（第 1 格 = 最左那张）"
+            text = "按顺序（对每组自定义都生效）"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             isChecked = ordered
-            setOnCheckedChangeListener { _, v -> ordered = v }
+            setOnCheckedChangeListener { _, v ->
+                ordered = v
+                // 勾选这一下还在分发，等它走完再重建面板，免得把正在点的控件拆掉
+                handler.post { render() }
+            }
         }
         b.addView(orderBox)
 
@@ -167,7 +210,10 @@ class Overlay(private val ctx: Context) {
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             isChecked = fast
-            setOnCheckedChangeListener { _, v -> fast = v }
+            setOnCheckedChangeListener { _, v ->
+                fast = v
+                handler.post { render() }
+            }
         }
         b.addView(fastBox)
 
@@ -175,7 +221,7 @@ class Overlay(private val ctx: Context) {
             setTextColor(Color.parseColor("#FFFFC857"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setPadding(0, 0, 0, px(4))
-            text = if (handOptions[handIdx] != null) "已按牌型判定，上面这行不生效" else " "
+            text = hintText()
         }
         b.addView(hint)
 
@@ -199,12 +245,71 @@ class Overlay(private val ctx: Context) {
     }
 
     private fun renderHandList(b: LinearLayout) {
-        b.addView(label("选择牌型"))
-        grid(b, handOptions.map { it?.cn ?: "自定义" }, 2, 92) { idx ->
-            handIdx = idx
-            mode = MODE_MAIN
+        b.addView(label("牌型 / 自定义（点一下切换，可多选）"))
+        // 按倍率从高到低排，和判定时的优先级一致，勾起来不容易看错
+        val names = HAND_ORDER.map { it.cn } + "自定义"
+        grid(b, names, 2, 92, selected = { idx ->
+            if (idx == HAND_ORDER.size) customOn else handSel.contains(HAND_ORDER[idx])
+        }) { idx ->
+            if (idx == HAND_ORDER.size) toggleCustom() else toggleHand(HAND_ORDER[idx])
             render()
         }
+        // 勾上自定义之后，就在这一页直接给个入口，省得退出去再点一次
+        if (customOn) {
+            b.addView(button("编辑自定义（" + groups.size + " 组）", wide = true) {
+                mode = MODE_GROUPS
+                render()
+            })
+        }
+        b.addView(summaryView())
+        b.addView(button("返回", wide = true) {
+            mode = MODE_MAIN
+            render()
+        })
+    }
+
+    private fun renderGroupList(b: LinearLayout) {
+        b.addView(label("自定义目标（成任意一组就停）"))
+        groups.forEachIndexed { gi, g ->
+            // 每组一行标题 + 5 张牌各占一行，点哪张进去改哪张
+            val head = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            head.addView(TextView(ctx).apply {
+                text = "第 " + (gi + 1) + " 组"
+                setTextColor(Color.parseColor("#AAFFFFFF"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            if (groups.size > 1) {
+                head.addView(cell("删除这一组", 78) {
+                    groups.removeAt(gi)
+                    // 删空了就没法编辑了，留一组空壳（没勾自定义时它也不参与判定）
+                    if (groups.isEmpty()) groups.add(Group.fresh())
+                    render()
+                })
+            }
+            b.addView(head)
+            for (i in 0 until Target.MAX_DRAWS) {
+                val row = cell("第 " + (i + 1) + " 张    " + g.fmt(i), 222) {
+                    if (g.editable(i)) {
+                        editGroup = gi
+                        editSlot = i
+                        mode = MODE_SLOT
+                        render()
+                    }
+                }
+                // 「不抽」之后的格子置灰：它们不算数，点了也只是让人困惑
+                row.alpha = if (g.editable(i)) 1f else 0.35f
+                b.addView(row)
+            }
+        }
+        b.addView(button("+ 再加一组", wide = true) {
+            groups.add(Group.fresh())
+            render()
+        })
+        b.addView(summaryView())
         b.addView(button("返回", wide = true) {
             mode = MODE_MAIN
             render()
@@ -212,42 +317,141 @@ class Overlay(private val ctx: Context) {
     }
 
     private fun renderSlotList(b: LinearLayout) {
-        b.addView(label("第 " + (slotIdx + 1) + " 张"))
-        // 第一行只有「任」，下面每行一个点数：无花色 / 萬 / 筒 / 索
+        if (editGroup !in groups.indices) editGroup = 0
+        if (editSlot !in 0 until Target.MAX_DRAWS) editSlot = 0
+        val g = groups.getOrNull(editGroup)
+        if (g == null) {
+            mode = MODE_MAIN
+            renderMain(b)
+            return
+        }
+        b.addView(label("第 " + (editGroup + 1) + " 组 · 第 " + (editSlot + 1) + " 张"))
+
+        // 这一组 5 张横着摆出来，点哪张改哪张，比一页一页翻快
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        for (i in 0 until Target.MAX_DRAWS) {
+            val c = cell(g.fmt(i), 40, on = i == editSlot) {
+                if (g.editable(i)) {
+                    editSlot = i
+                    render()
+                }
+            }
+            // 「不抽」后面的格子置灰：它们不算数，点了也只是让人困惑
+            c.alpha = if (g.editable(i)) 1f else 0.35f
+            row.addView(c)
+        }
+        b.addView(row)
+
+        // 第 1 张只能是牌；第 2 张起可以先选「不抽」，把这一组截短
         val head = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        head.addView(cell("任", 54) { pickSlot(0, 0) })
+        val skip = g.skip[editSlot]
+        head.addView(cell("任", 54, on = !skip && g.point[editSlot] == 0) { pickSlot(0, 0) })
+        if (editSlot > 0) {
+            head.addView(cell("不抽", 54, on = skip) { pickSkip() })
+        }
         b.addView(head)
         for (p in 1..5) {
-            val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-            row.addView(cell(p.toString(), 54) { pickSlot(p, 0) })
+            val prow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+            prow.addView(
+                cell(p.toString(), 54,
+                    on = !skip && g.point[editSlot] == p && g.suit[editSlot] == 0) { pickSlot(p, 0) }
+            )
             for (s in 1..3) {
-                row.addView(cell(p.toString() + Target.SUIT_CN[s], 54) { pickSlot(p, s) })
+                prow.addView(
+                    cell(p.toString() + Target.SUIT_CN[s], 54,
+                        on = !skip && g.point[editSlot] == p && g.suit[editSlot] == s) { pickSlot(p, s) }
+                )
             }
-            b.addView(row)
+            b.addView(prow)
         }
         b.addView(button("返回", wide = true) {
-            mode = MODE_MAIN
+            mode = MODE_GROUPS
             render()
         })
     }
 
+    // ------------------------------------------------------------ 选项
     private fun pickSlot(p: Int, s: Int) {
-        point[slotIdx] = p
-        suit[slotIdx] = s
-        mode = MODE_MAIN
+        val g = groups.getOrNull(editGroup) ?: return
+        g.point[editSlot] = p
+        g.suit[editSlot] = s
+        // 选了牌就不再是「不抽」；原来的截断点顺延到下一个还标着「不抽」的格子
+        g.skip[editSlot] = false
         render()
     }
 
-    private fun cell(text: String, w: Int, onClick: () -> Unit): TextView =
+    private fun pickSkip() {
+        val g = groups.getOrNull(editGroup) ?: return
+        // 第 1 张不许「不抽」：一组至少要有一张牌
+        if (editSlot <= 0) return
+        g.skip[editSlot] = true
+        render()
+    }
+
+    private fun toggleHand(h: Hand) {
+        if (!handSel.add(h)) handSel.remove(h)
+    }
+
+    private fun toggleCustom() {
+        customOn = !customOn
+        // 第一次勾上先给一组默认牌面（原来那组 3 / 2 / 5 / 任 / 任），
+        // 免得进去是空的、不知道从哪下手
+        if (customOn && groups.isEmpty()) groups.add(Group.legacy())
+    }
+
+    private fun handNames(): List<String> = handSel.map { it.name }
+
+    private fun specs(): List<String> = if (customOn) groups.map { it.spec() } else emptyList()
+
+    private fun currentTarget(): TargetBase? =
+        runCatching { Targets.combine(handNames(), specs(), ordered) }.getOrNull()
+
+    private fun handButtonText(): String {
+        val n = handSel.size + (if (customOn) groups.size else 0)
+        return if (n == 0) "选择牌型 / 自定义" else "已选 " + n + " 个目标（点击修改）"
+    }
+
+    private fun hintText(): String {
+        val stop = currentTarget()?.stopCount ?: Target.MAX_DRAWS
+        return when {
+            customOn && handSel.isNotEmpty() -> "牌型和自定义一起判定，成任意一个就停"
+            fast && stop < Target.MAX_DRAWS -> "目标只要前几张，快速模式也不会连点铺满"
+            else -> " "
+        }
+    }
+
+    /** 底部摘要：用和开跑时同一个目标对象，优先级、牌型名都不会跟实际跑的差开。 */
+    private fun summaryView(): TextView = TextView(ctx).apply {
+        setTextColor(Color.parseColor("#99FFFFFF"))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        setPadding(0, px(4), 0, px(2))
+        maxLines = 3
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        text = "当前：" + (currentTarget()?.toString() ?: "未选择")
+    }
+
+    private fun start() {
+        val svc = CaptureService.instance
+        if (svc == null) {
+            BotLog.add("服务没在跑，先回 App 授权抓屏")
+            return
+        }
+        if (handSel.isEmpty() && (!customOn || groups.isEmpty())) {
+            BotLog.add("还没选目标：点开「选择牌型 / 自定义」勾一个")
+            return
+        }
+        svc.startBotFromUi(specs(), handNames(), ordered, fast)
+        collapse()
+    }
+
+    // ------------------------------------------------------------ 控件
+    private fun cell(text: String, w: Int, on: Boolean = false, onClick: () -> Unit): TextView =
         TextView(ctx).apply {
             this.text = text
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                cornerRadius = px(6).toFloat()
-                setColor(Color.parseColor("#33FFFFFF"))
-            }
+            background = chip(on)
             layoutParams = LinearLayout.LayoutParams(px(w), px(30)).apply {
                 marginEnd = px(3)
                 topMargin = px(3)
@@ -260,6 +464,7 @@ class Overlay(private val ctx: Context) {
         items: List<String>,
         cols: Int,
         cellW: Int = 56,
+        selected: (Int) -> Boolean = { false },
         onPick: (Int) -> Unit,
     ) {
         var row: LinearLayout? = null
@@ -268,12 +473,12 @@ class Overlay(private val ctx: Context) {
                 row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
                 parent.addView(row)
             }
-            val cell = button(text, wide = false) { onPick(i) }
-            cell.layoutParams = LinearLayout.LayoutParams(px(cellW), px(32)).apply {
+            val c = button(text, wide = false, on = selected(i)) { onPick(i) }
+            c.layoutParams = LinearLayout.LayoutParams(px(cellW), px(32)).apply {
                 marginEnd = px(4)
                 topMargin = px(3)
             }
-            row?.addView(cell)
+            row?.addView(c)
         }
     }
 
@@ -284,17 +489,19 @@ class Overlay(private val ctx: Context) {
         setPadding(0, px(2), 0, px(3))
     }
 
-    private fun button(text: String, wide: Boolean, onClick: () -> Unit): TextView =
+    private fun button(
+        text: String,
+        wide: Boolean,
+        on: Boolean = false,
+        onClick: () -> Unit,
+    ): TextView =
         TextView(ctx).apply {
             this.text = text
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER
             setPadding(px(8), px(4), px(8), px(4))
-            background = GradientDrawable().apply {
-                cornerRadius = px(6).toFloat()
-                setColor(Color.parseColor("#33FFFFFF"))
-            }
+            background = chip(on)
             layoutParams = if (wide) {
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, px(34),
@@ -305,44 +512,15 @@ class Overlay(private val ctx: Context) {
             setOnClickListener { onClick() }
         }
 
-    // ------------------------------------------------------------ 选项
-    private fun slotText(i: Int): String {
-        val p = point[i]
-        if (p == 0) return "任"
-        return if (suit[i] == 0) p.toString() else p.toString() + Target.SUIT_CN[suit[i]]
-    }
-
-    private fun handText(): String = handOptions[handIdx]?.cn ?: "自定义"
-
-    private fun slotOptionLabels(): List<String> =
-        SLOT_POINTS.indices.map { idx ->
-            val p = SLOT_POINTS[idx]
-            val s = SLOT_SUITS[idx]
-            when {
-                p == 0 -> "任"
-                s == 0 -> p.toString()
-                else -> p.toString() + Target.SUIT_CN[s]
-            }
+    /** 选中态用亮一点的底 + 描边，没选中就还是原来的半透明白。 */
+    private fun chip(on: Boolean): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = px(6).toFloat()
+        if (on) {
+            setColor(Color.parseColor("#6657C8FF"))
+            setStroke(px(1), Color.parseColor("#FF7AC8FF"))
+        } else {
+            setColor(Color.parseColor("#33FFFFFF"))
         }
-
-    private fun targetSpec(): String =
-        (0 until 5).joinToString(" ") { i ->
-            val p = point[i]
-            when {
-                p == 0 -> "任意"
-                suit[i] == 0 -> p.toString()
-                else -> p.toString() + Target.SUIT_CN[suit[i]]
-            }
-        }
-
-    private fun start() {
-        val svc = CaptureService.instance
-        if (svc == null) {
-            BotLog.add("服务没在跑，先回 App 授权抓屏")
-            return
-        }
-        svc.startBotFromUi(targetSpec(), 0, handOptions[handIdx]?.name, ordered, fast)
-        collapse()
     }
 
     // ------------------------------------------------------------ 拖动
@@ -435,12 +613,68 @@ class Overlay(private val ctx: Context) {
         }
     }
 
+    /**
+     * 一组自定义目标：5 个格子，前 len 个算数，后面的「不抽」。
+     *
+     * 「不抽」按格记而不是只记一个长度：改中间那格时后面要跟着置灰，
+     * 改回来时还得知道原来哪几格是「不抽」（和 PC 版的下拉框一个道理）。
+     */
+    private class Group {
+        val point = IntArray(Target.MAX_DRAWS)
+        val suit = IntArray(Target.MAX_DRAWS)
+        val skip = BooleanArray(Target.MAX_DRAWS)
+
+        /** 抽到第几张：第一个「不抽」的位置，都没标就是 5。第 1 张不允许「不抽」。 */
+        val len: Int
+            get() = (1 until Target.MAX_DRAWS).firstOrNull { skip[it] } ?: Target.MAX_DRAWS
+
+        /** 这一格还能不能改：截断点自己也能改（改回牌面就把截断往后挪）。 */
+        fun editable(i: Int): Boolean = i <= len
+
+        fun fmt(i: Int): String {
+            // 截断点和它后面的格子都显示成「不抽」，跟 PC 版下拉框看到的是一回事
+            if (i >= len) return "不抽"
+            val p = point[i]
+            if (p == 0) return "任"
+            return if (suit[i] == 0) p.toString() else p.toString() + Target.SUIT_CN[suit[i]]
+        }
+
+        /** 交给 Targets.parse 的写法；「不抽」之后的格子不写进去。 */
+        fun spec(): String = (0 until len).joinToString(" ") { fmt(it) }
+
+        companion object {
+            /** 老界面那一组默认牌面：3 / 2 / 5 / 任 / 任。 */
+            fun legacy(): Group = Group().apply {
+                point[0] = 3
+                point[1] = 2
+                point[2] = 5
+            }
+
+            /** 新加的一组：先要一张 1，后面的「不抽」。 */
+            fun fresh(): Group = Group().apply {
+                point[0] = 1
+                for (i in 1 until Target.MAX_DRAWS) skip[i] = true
+            }
+        }
+    }
+
     private companion object {
         const val MODE_MAIN = 0
         const val MODE_HAND = 1
         const val MODE_SLOT = 2
+        const val MODE_GROUPS = 3
 
-        val SLOT_POINTS = intArrayOf(0, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5)
-        val SLOT_SUITS = intArrayOf(0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3)
+        /** 牌型页的顺序：倍率从高到低，和判定优先级、PC 版的勾选清单一致。 */
+        val HAND_ORDER = listOf(
+            Hand.STRAIGHT_FLUSH,
+            Hand.QUADS,
+            Hand.FLUSH,
+            Hand.FULL_HOUSE,
+            Hand.STRAIGHT,
+            Hand.TRIPS,
+            Hand.TWO_PAIR,
+            Hand.PAIR,
+            Hand.HIGH,
+        )
     }
 }

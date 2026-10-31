@@ -69,6 +69,31 @@ def _drawn_from(left: tuple[int, ...]) -> list[Card]:
     return out
 
 
+@lru_cache(maxsize=None)
+def _cp_state(state: tuple[int, ...], target: Hand, depth: int) -> float:
+    """单个状态的「还能不能凑出 target」。
+
+    缓存挂在**模块级**，不是每次调用现建一个 —— 多选目标每判一次手牌都要问
+    「这个目标还来不来得及」，现建缓存的话每次都要重跑一遍全表，
+    实测点一下「多选」界面要冻 11~17 秒。
+    """
+    cur = _drawn_from(state)
+    if target in all_hands(cur):
+        return 1.0
+    if depth == 0:
+        return 0.0
+    total = sum(state)
+    if total == 0:
+        return 0.0
+    acc = 0.0
+    for i, n in enumerate(state):
+        if n:
+            nxt = list(state)
+            nxt[i] -= 1
+            acc += (n / total) * _cp_state(tuple(nxt), target, depth - 1)
+    return acc
+
+
 def completion_probability(
     drawn: Iterable[Card] = (),
     target: Hand = Hand.QUADS,
@@ -78,26 +103,7 @@ def completion_probability(
     """在 draws_left 次抽取内凑出 target 的概率（0 表示已不可能）。"""
     if left is None:
         left = as_vector(drawn)
-
-    @lru_cache(maxsize=None)
-    def f(state: tuple[int, ...], depth: int) -> float:
-        cur = _drawn_from(state)
-        if target in all_hands(cur):
-            return 1.0
-        if depth == 0:
-            return 0.0
-        total = sum(state)
-        if total == 0:
-            return 0.0
-        acc = 0.0
-        for i, n in enumerate(state):
-            if n:
-                nxt = list(state)
-                nxt[i] -= 1
-                acc += (n / total) * f(tuple(nxt), depth - 1)
-        return acc
-
-    return f(left, draws_left)
+    return _cp_state(tuple(left), target, draws_left)
 
 
 def completion_probability_pred(check, draws_left: int = MAX_DRAWS,
@@ -136,4 +142,3 @@ def expected_attempts(target: Hand, per_run_draws: int = MAX_DRAWS) -> float:
 def reachable(drawn: Iterable[Card], target: Hand, draws_left: int) -> bool:
     """还不来不来得及 —— 自动抽牌的剪枝开关。"""
     return completion_probability(drawn, target, draws_left) > 0.0
-
