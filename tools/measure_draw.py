@@ -54,8 +54,6 @@ def main():
     lines = []
     t0 = time.time()
     prev_mask = (False,) * G.SLOT_COUNT
-    prev_frame = None
-    last_change_t = t0
     events = []
 
     with mss.MSS() as sct:
@@ -70,14 +68,6 @@ def main():
                 patch = gray[14:84, x1:x2]
                 mask.append(int((patch < INK).sum()) > DARK_MIN)
             mask = tuple(mask)
-
-            motion = 0.0
-            if prev_frame is not None and prev_frame.shape == frame.shape:
-                motion = float(np.abs(frame.astype(np.int16)
-                                      - prev_frame.astype(np.int16)).mean())
-                if motion > 1.0:
-                    last_change_t = now
-            prev_frame = frame
 
             if mask != prev_mask:
                 n = sum(mask)

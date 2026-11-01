@@ -117,7 +117,7 @@ class Stats:
 
 
 class Bot:
-    def __init__(self, capture, target: Hand, lucky: Hand | None = None,
+    def __init__(self, capture, target: Hand | TargetBase, lucky: Hand | None = None,
                  auto_start: bool = False, dry_run: bool = False,
                  max_attempts: int = 0, verbose: bool = True, poll: float = 0.25,
                  max_bp: int = 0, enemy_policy=None,
