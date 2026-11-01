@@ -19,39 +19,66 @@ import java.io.File
  */
 class LayoutTest {
 
-    /** 2376×1080 实拍图上量到的坐标（.notes/margin-android.md §11.1 / §11.5）。 */
+    /** 2376×1080 实拍图上量到的坐标（.notes/knowledge/margin-android.md §12.1 / §12.6）。 */
     private class Fake(
         val w: Int = 2376,
         val h: Int = 1080,
         val cardLefts: IntArray = intArrayOf(294, 605, 916, 1227, 1538),
+        val cardW: Int = 289,
         val cardTop: Int = 520,
         val cardBottom: Int = 640,
         val button: Boolean = true,
+        val btnX0: Int = 1918,
+        val btnX1: Int = 2286,
+        val btnTop: Int = 695,
+        val btnBottom: Int = 816,
     ) : Layout.Rows {
         override fun row(y: Int): IntArray {
             val out = IntArray(w) { BG }
             if (y in cardTop until cardBottom) {
                 for (l in cardLefts) {
-                    for (x in l until minOf(w, l + 289)) out[x] = CARD
+                    for (x in l until minOf(w, l + cardW)) out[x] = CARD
                 }
             }
-            if (button && y in 695 until 816) {
-                for (x in 1918 until 2286) out[x] = CYAN
+            if (button && y in btnTop until btnBottom) {
+                for (x in btnX0 until minOf(w, btnX1)) out[x] = CYAN
             }
             return out
         }
     }
 
-    /** 实拍图那台的三个数。 */
+    /** 20:9 基准屏的一帧：卡牌行 + 边距 0 的抽牌按钮（青色 2405…2765）。 */
+    private fun fake2800() = Fake(
+        w = 2800, h = 1260,
+        cardLefts = intArrayOf(356, 719, 1082, 1445, 1808),
+        cardW = 338,
+        btnX0 = 2405, btnX1 = 2765, btnTop = 811, btnBottom = 953,
+    )
+
+    /** 实拍图那台（边距 120）的三个数。 */
     @Test
     fun measuresElevenByFiveFrame() {
         val got = Layout.measure(2376, 1080, Fake())
         assertNotNull("合成图应该能量出来", got)
         assertEquals("数到 5 张卡", 5, got!!.cards)
         assertEquals("s = 步进 311 / 363", 311f / 363f, got.s, 0.002f)
-        assertEquals("ox = 294 − s·356", -11f, got.ox, 1.5f)
+        assertEquals("ox = 294 − s·356（居中组）", -11f, got.ox, 1.5f)
         assertTrue("量到了边距", got.hasMargin)
-        assertEquals("m = 2405 − (1918 − ox)/s", 153.5f, got.m, 2f)
+        // 右锚折回：2800 − (2376 − 1918)/s = 2265.4 → m = 2405 − 2265.4 = 139.6
+        // （旧版用居中偏移折回，这里会算出 153.5，多 14 px —— 就是 §12.6 那个 bug）
+        assertEquals("m（基准像素）", 139.6f, got.m, 2f)
+        assertEquals("反推游戏里填的数 139.6 / 1.169 ≈ 120", 119.4f, got.m / Geom.MARGIN_K, 2f)
+    }
+
+    /** 20:9 基准屏、边距 0：m 必须量成 0（旧版有 +1 px 的固定偏差）。 */
+    @Test
+    fun measuresTwentyByNineFrame() {
+        val got = Layout.measure(2800, 1260, fake2800())
+        assertNotNull("合成图应该能量出来", got)
+        assertEquals("数到 5 张卡", 5, got!!.cards)
+        assertEquals("s = 363 / 363", 1f, got.s, 0.002f)
+        assertEquals("ox = 0", 0f, got.ox, 1f)
+        assertEquals("边距 0 就该量成 0", 0f, got.m, 2f)
     }
 
     /** 牌桌空（没有卡牌白带）→ 量不出来，调用方按公式继续。 */
@@ -136,9 +163,10 @@ class LayoutTest {
         assertEquals("s", 0.8568f, got.s, 0.01f)
         assertEquals("ox", -11f, got.ox, 4f)
         assertTrue("量到了边距", got.hasMargin)
-        assertEquals("m（基准像素）", 153.5f, got.m, 8f)
-        // 反推游戏里填的数：153.5 / 1.169 ≈ 131，和另一台的 130 对得上
-        assertEquals("游戏边距值", 131f, got.m / Geom.MARGIN_K, 8f)
+        // 旧版在这里算出 153.5（居中偏移，多 14 px）→ 超过阈值 10 px → 开局误停，见 §12.6
+        assertEquals("m（基准像素）", 139.6f, got.m, 6f)
+        // 反推游戏里填的数：139.6 / 1.169 ≈ 119.4，就是 §12.1 认出来的 120
+        assertEquals("游戏边距值", 119.4f, got.m / Geom.MARGIN_K, 6f)
         println(
             String.format(
                 java.util.Locale.US,

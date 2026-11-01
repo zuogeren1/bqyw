@@ -8,7 +8,7 @@ import org.junit.Test
 /**
  * 边距换算的 JVM 单测（不碰 Android API）。
  *
- * 数据来源 .notes/margin-android.md：边距 130 实测内缩 151.96 px（k = 1.1689），
+ * 数据来源 .notes/knowledge/margin-android.md：边距 130 实测内缩 151.96 px（k = 1.1689），
  * 纵向 dy 恒为 0，居中的控件逐像素不动。这里把三条硬结论钉住：
  *
  *  1. **边距 0 → 一个数都不许变**（老用户默认值，行为必须和 1.2.0 第一版一模一样）；
@@ -88,6 +88,39 @@ class MarginTest {
         assertEquals("2400×1080 上缩放是 0.857", 0.857f, fit.s, 0.001f)
     }
 
+    /**
+     * 11:5 上三条锚边**各贴屏幕的对应边**（.notes/knowledge/margin-android.md §12.5）。
+     *
+     * 这是和 v1.2.0 最大的行为差别：以前三条都套居中偏移 ox，左右两组各偏 12 px；
+     * 轮次徽章窗口只有 32 px 宽，偏 12 px 就把数字左边切掉一条。
+     */
+    @Test
+    fun elevenByFiveAnchorsFollowScreenEdges() {
+        Geom.setScreen(2376, 1080)
+        Geom.setMargin(0)
+
+        assertEquals("左锚 0 → 屏幕 0", 0L, Geom.lx(0f).toLong())
+        assertEquals("左锚 60 → 51", 51L, Geom.lx(60f).toLong())
+        assertEquals("居中 356 → 293（ox = −12）", 293L, Geom.cx(356f).toLong())
+        assertEquals("居中 1400 = 屏幕正中 1188", 1188L, Geom.cx(1400f).toLong())
+        assertEquals("右锚 2405 → 2037", 2037L, Geom.rx(2405f).toLong())
+        assertEquals("右锚 2800 → 屏幕右沿 2376", 2376L, Geom.rx(2800f).toLong())
+
+        assertArrayEquals(
+            "徽章窗口贴着屏幕右边（旧版这里是 2237…2270）",
+            intArrayOf(2225, 870, 2258, 921),
+            Badge.window(2376, 1080),
+        )
+
+        Geom.setMargin(120)
+        assertArrayEquals(
+            "边距 120：窗口再整体左移 120（实拍图的数字落在 2115）",
+            intArrayOf(2105, 870, 2137, 921),
+            Badge.window(2376, 1080),
+        )
+        assertEquals("抽牌 2520 → 2016", 2016L, Geom.tapDraw().first.toLong())
+        assertEquals("纵向不受边距影响", 759L, Geom.tapDraw().second.toLong())
+    }
     /** 越界钳制：负数按 0、超过 300 按 300（300 × 1.169 ≈ 351）。 */
     @Test
     fun marginIsClampedTo300() {

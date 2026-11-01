@@ -513,12 +513,15 @@ class CaptureService : Service() {
      * 只在 y=885 这一行里找第一段够长的青色；找不到就返回 null（牌抽满了按钮是灰的、
      * 不在抽牌页、色值对不上…都算量不出）。**结果只写日志、不自动采用** ——
      * 色值毕竟是从两张参考图里挑的，宁可让人自己判断。
+     *
+     * 抽牌按钮是右锚：扫的范围和折回基准都走 [Fit.rpx] / [Fit.runpx]。用居中偏移
+     * 折回会在 11:5 上多算 14 px（边距 0 也会显示成 14），见 §12.6。
      */
     private fun measureMargin(bmp: Bitmap, fit: Fit): Float? {
         val y = fit.py(Geom.DRAW[1]).coerceIn(0, bmp.height - 1)
         // 边距 300 时左沿 = 2405 − 351 = 2054，留够两头
-        val xa = fit.px(1900f).coerceIn(0, bmp.width - 1)
-        val xb = fit.px(2600f).coerceIn(xa, bmp.width - 1)
+        val xa = fit.rpx(1900f).coerceIn(0, bmp.width - 1)
+        val xb = fit.rpx(2600f).coerceIn(xa, bmp.width - 1)
         val n = xb - xa + 1
         if (n < 8) return null
         val row = IntArray(n)
@@ -540,7 +543,7 @@ class CaptureService : Service() {
             if (b - r > 55 && g - r > 45) {
                 run++
                 if (run >= minRun) {
-                    val base = (xa + (i - run + 1) - fit.ox) / fit.s
+                    val base = fit.runpx((xa + (i - run + 1)).toFloat())
                     return Geom.DRAW_EDGE - base
                 }
             } else {

@@ -18,13 +18,19 @@ import kotlin.math.roundToInt
  *  2. **抽牌按钮**：沿按钮中线扫一行，找最左边那段够长的青色（边距 0 时左沿固定在
  *     基准 2405）→ `m = 2405 − (左沿 − ox) / s`。
  *
- * 实测（.notes/margin-android.md §11.5）：
+ * 实测（.notes/knowledge/margin-android.md §12.6，五帧残差全在 ±1 px 内）：
  *
- * | 帧 | s | ox | m | 反推边距 |
- * |---|---|---|---|---|
- * | 2800×1260 边距 0   | 1.00000 | +1.0  | 1.0   | 0.9 → 0 ✓ |
- * | 2800×1260 边距 130 | 1.00000 | +1.0  | 152.0 | 130.0 ✓ |
- * | 2376×1080 未知     | 0.85675 | −11.0 | 153.5 | 131.3 |
+ * | 帧                  | s       | ox    | m     | 反推边距 |
+ * |---------------------|---------|-------|-------|----------|
+ * | 2800×1260 边距 0    | 1.00000 | +1.0  |  0.0  | 0 ✓      |
+ * | 2800×1260 边距 130  | 1.00000 | +1.0  | 151.0 | 130 ✓    |
+ * | 2376×1080 边距 0    | 0.85675 | −11.0 | −0.5  | 0 ✓      |
+ * | 2376×1080 边距 100  | 0.85675 | −11.0 | 116.0 | 99 → 100 ✓ |
+ * | 2376×1080 边距 120  | 0.85675 | −11.0 | 139.6 | 119 → 120 ✓ |
+ *
+ * 第 2 步折回基准坐标时**必须用右锚**（[Fit.rpx] 的逆）：抽牌按钮是右锚控件。
+ * 用居中偏移 ox 折回会凭空多算 2|ox|/s（11:5 上 14 px），边距 0 也被量成 14 px，
+ * 超过 [MAX_M_DIFF] → 开机就停手（这就是 v1.2.0 在 11:5 上的 bug，§12.6）。
  *
  * 这个文件**不碰任何 Android API**（只吃每行的 IntArray），所以能在 JVM 单测里跑。
  */
@@ -131,16 +137,21 @@ object Layout {
         val s = pitch / CARD_PITCH
         val ox = xs[0] - s * CARD1_X
 
-        return Measured(s, ox, margin(rows, w, h, s, ox), xs.size)
+        return Measured(s, ox, margin(rows, w, h, s), xs.size)
     }
 
-    /** 抽牌按钮的青色左沿 → 边距（基准坐标）。找不到就 NaN。 */
-    private fun margin(rows: Rows, w: Int, h: Int, s: Float, ox: Float): Float {
+    /**
+     * 抽牌按钮的青色左沿 → 边距（基准坐标）。找不到就 NaN。
+     *
+     * 抽牌按钮是**右锚**，所以扫的范围和折回都走右锚换算。整条链路里最怕的就是这里
+     * 用了居中偏移：11:5 上它会凭空多算 2|ox|/s ≈ 14 px，边距 0 也变成 14 px。
+     */
+    private fun margin(rows: Rows, w: Int, h: Int, s: Float): Float {
         val y = (s * DRAW_Y).roundToInt().coerceIn(0, h - 1)
         val row = rows.row(y)
         // 边距 300 时左沿 = 2405 − 351 = 2054，两头都留够
-        val xa = (ox + s * 1900f).roundToInt().coerceIn(0, w - 1)
-        val xb = (ox + s * 2600f).roundToInt().coerceIn(xa, w - 1)
+        val xa = rpx(w, s, 1900f).coerceIn(0, w - 1)
+        val xb = rpx(w, s, 2600f).coerceIn(xa, w - 1)
         val minRun = (10f * s).roundToInt().coerceAtLeast(4)
         var run = 0
         var i = xa
@@ -153,8 +164,7 @@ object Layout {
             if (b - r > 55 && g - r > 45 && b > 140) {
                 run++
                 if (run >= minRun) {
-                    val left = (i - run + 1).toFloat()
-                    return DRAW_EDGE - (left - ox) / s
+                    return DRAW_EDGE - baseOf(w, s, (i - run + 1).toFloat())
                 }
             } else {
                 run = 0
@@ -163,6 +173,12 @@ object Layout {
         }
         return Float.NaN
     }
+
+    /** 右锚：基准 v → 屏幕 x（[Fit.rpx] 的公式；这里只要 s，不建对象）。 */
+    private fun rpx(w: Int, s: Float, v: Float): Int = (w - (Fit.BASE_W - v) * s).roundToInt()
+
+    /** 右锚的逆：屏幕 x → 基准 x（[Fit.runpx] 的公式）。 */
+    private fun baseOf(w: Int, s: Float, x: Float): Float = Fit.BASE_W - (w - x) / s
 
     /**
      * 一行里"够宽的一段亮像素"的左沿。

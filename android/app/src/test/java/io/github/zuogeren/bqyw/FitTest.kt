@@ -6,12 +6,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [Fit] 的 JVM 单测：按高度铺满 + 水平居中（.notes/margin-android.md §11）。
+ * [Fit] 的 JVM 单测：按高度铺满 + **三条锚边**（.notes/knowledge/margin-android.md §11 / §12）。
  *
- * 三条底线：
+ * 四条底线：
  *  1. **2800×1260 上必须一个数都不变** —— 老用户全在这块屏上，改完得逐值相等；
- *  2. 2376×1080（11:5，实拍图那台）→ s=0.85714、ox=−12、oy=0；
- *  3. 1920×1080（16:9，**没有真机样本**）→ 只保证公式不崩、给出可解释的数。
+ *  2. 2376×1080（11:5，实拍图那台）→ s=0.85714、ox=−12、oy=0，且左/中/右三条锚边
+ *     分别贴屏幕左边、正中、右边（旧版三条都套居中偏移，差 12 px）；
+ *  3. 实拍图上的坐标（抽牌按钮 1918…2286、徽章窗口 2106…2138）要逐值对得上；
+ *  4. 1920×1080（16:9，**没有真机样本**）→ 只保证公式不崩、给出可解释的数。
  */
 class FitTest {
 
@@ -21,7 +23,7 @@ class FitTest {
         Geom.setScreen(2800, 1260)
     }
 
-    /** 1) 20:9 基准屏：s=1、ox=0、oy=0，所有坐标和改之前逐值相等。 */
+    /** 1) 20:9 基准屏：三条锚边恒等，所有坐标和改之前逐值相等。 */
     @Test
     fun base2800x1260IsIdentity() {
         val fit = Fit(2800, 1260)
@@ -29,12 +31,14 @@ class FitTest {
         assertEquals("ox", 0f, fit.ox, 1e-4f)
         assertEquals("oy", 0f, fit.oy, 1e-4f)
 
-        // 改之前的实测值（refs/安卓端-自定义边距-0.jpg），一个都不许动
+        // 改之前的实测值（refs/安卓端-自定义边距-0.jpg），一个都不许动；三条锚边也要恒等
         val pinned = intArrayOf(
             0, 60, 356, 392, 427, 1015, 1400, 2405, 2520, 2624, 2662, 2800,
         )
         for (v in pinned) {
             assertEquals("px($v)", v, fit.px(v.toFloat()))
+            assertEquals("lpx($v)", v, fit.lpx(v.toFloat()))
+            assertEquals("rpx($v)", v, fit.rpx(v.toFloat()))
         }
         val pinnedY = intArrayOf(0, 300, 360, 811, 870, 885, 1015, 1075, 1140, 1260)
         for (v in pinnedY) {
@@ -53,40 +57,45 @@ class FitTest {
         )
     }
 
-    /** 2) 11:5 实拍图那台：按高度铺满，两侧各裁 12 px。 */
+    /** 2) 11:5 实拍图那台：按高度铺满，缩放 0.857，居中组左偏 12 px。 */
     @Test
     fun elevenByFiveFillsHeightAndCropsSides() {
         val fit = Fit(2376, 1080)
         assertEquals("s = 1080/1260", 1080f / 1260f, fit.s, 1e-6f)
         assertEquals("oy 恒 0", 0f, fit.oy, 1e-6f)
-        // 2800*0.85714 = 2400 > 2376，所以 ox 是负的：两侧各裁 12 px
+        // 居中的东西（卡牌行）按 ox = −12 画：2800·s = 2400 > 2376，两侧各"多出" 12 px
         assertEquals("ox = (2376−2400)/2", -12f, fit.ox, 0.01f)
-        // 画布 2400 宽、屏幕 2376 宽：右边比屏幕多出 12 px（左边也裁 12），
-        // 所以 ox + 2800·s 是画布右沿 = 2388，不是屏幕宽 2376。
-        assertEquals("画布右沿 = ox + 2800·s", 2388f, fit.ox + 2800f * fit.s, 0.01f)
-        assertEquals("屏幕高 = 1260·s（正好铺满）", 1080f, 1260f * fit.s, 0.01f)
+        assertEquals("居中组右沿 = ox + 2800·s", 2388f, fit.ox + 2800f * fit.s, 0.01f)
+
+        // 三条锚边：左贴屏左、中留 ox、右贴屏右（§12.5 实拍图 ox_eff = 0 / −12 / −24）
+        assertEquals("左锚 0 → 屏幕 0", 0, fit.lpx(0f))
+        assertEquals("左锚 2800 → 2400（比屏幕宽，超出部分在右侧）", 2400, fit.lpx(2800f))
+        assertEquals("居中 1400 = 屏幕正中", 1188, fit.px(1400f))
+        assertEquals("右锚 2800 → 屏幕右沿", 2376, fit.rpx(2800f))
+        assertEquals("右锚 0 → −24（左锚的 24 是这么来的）", -24, fit.rpx(0f))
     }
 
-    /** 2b) 拿实拍图上量到的坐标对一遍（11:5 那张，实测边距 ≈131 → m ≈ 153）。 */
+    /** 2b) 拿实拍图上量到的坐标对一遍（11:5、边距 120 那张）。 */
     @Test
     fun elevenByFiveMatchesRealScreenshot() {
         Geom.setScreen(2376, 1080)
-        Geom.setMargin(131) // 反推值：实测 m_base 153.5 / 1.169 ≈ 131.3
+        Geom.setMargin(120) // §12.1：这张实拍图是边距 120（不是以前推的 131）
         val fit = Fit(2376, 1080)
-        val m = Geom.marginPx
 
-        // 抽牌按钮（右锚）：实拍图实测左沿 1918、右沿 2286
-        val left = fit.px(2405f - m)
-        val right = fit.px(2834f - m)
-        assertEquals("按钮左沿和实拍图对得上", 1918, left)
-        assertTrue("按钮右沿和实拍图对得上（实测 2286）", Math.abs(right - 2286) <= 3)
+        // 抽牌按钮（右锚）：实拍图实测青色左沿 1918、右沿 2286
+        val left = Geom.rx(2405f)
+        val right = Geom.rx(2834f)
+        assertTrue("按钮左沿实测 1918，算出 " + left, Math.abs(left - 1918) <= 2)
+        assertTrue("按钮右沿实测 2286，算出 " + right, Math.abs(right - 2286) <= 2)
 
-        // 轮次徽章窗口（右锚）：实拍图实测 2106,870 → 2138,921
+        // 轮次徽章窗口（右锚）：实拍图数字落在 2106,870 → 2138,921
         val win = Badge.window(2376, 1080)
-        assertEquals("徽章窗口左", 2106, win[0])
+        assertTrue("徽章窗口左实测 2106，算出 " + win[0], Math.abs(win[0] - 2106) <= 2)
         assertEquals("徽章窗口上", 870, win[1])
-        assertEquals("徽章窗口右", 2138, win[2])
+        assertTrue("徽章窗口右实测 2138，算出 " + win[2], Math.abs(win[2] - 2138) <= 2)
         assertEquals("徽章窗口下", 921, win[3])
+        // 窗口 32 px 宽、数字约 17 px：偏 12 px 就只剩半个字了 —— 这就是要用右锚的原因
+        assertTrue("窗口要盖住数字", win[2] - win[0] >= 30)
 
         // 点击点必须落在按钮里（1918…2286）
         val d = Geom.tapDraw()
@@ -99,12 +108,18 @@ class FitTest {
     fun sixteenByNineIsFormulaOnly() {
         val fit = Fit(1920, 1080)
         assertEquals("s 还是按高度", 1080f / 1260f, fit.s, 1e-6f)
-        // 2400 宽的画布塞进 1920：两侧各裁 240 px
+        // 2400 宽的画布塞进 1920：居中组两侧各偏 240 px
         assertEquals("ox = (1920−2400)/2", -240f, fit.ox, 0.01f)
         assertEquals("oy 恒 0", 0f, fit.oy, 1e-6f)
-        // 说明一下：16:9 上游戏大概会重新排布，这里只保证公式不崩；
-        // 真遇到这台机器靠开局自检（Layout）停手，不靠这张表硬点。
-        assertTrue("左锚会跑到屏幕外（所以必须靠自检兜底）", fit.px(60f) < 0)
+
+        // 锚边照样贴屏幕：左 0、中 960、右 1920
+        assertEquals("左锚 0 → 0", 0, fit.lpx(0f))
+        assertEquals("居中 1400 → 960", 960, fit.px(1400f))
+        assertEquals("右锚 2800 → 1920", 1920, fit.rpx(2800f))
+
+        // 注意：16:9 上"居中"这一组整体比左锚靠左 240 px，卡牌行和边距表会错开；
+        // 这不代表模型对 —— 只代表没有样本。真遇到这台机器靠开局自检（Layout）停手兜底。
+        assertTrue("居中组会跑到屏幕外，所以必须靠自检兜底", fit.px(60f) < 0)
     }
 
     /** 4) 边距叠加：m 在基准坐标里减，再交给 Fit 缩放。 */
@@ -113,10 +128,9 @@ class FitTest {
         Geom.setScreen(2376, 1080)
         Geom.setMargin(130)
         val fit = Fit(2376, 1080)
-        val expect = Math.round(fit.ox + fit.s * (2520f - Geom.marginPx))
         assertEquals(
-            "抽牌 x = ox + s·(2520 − m)",
-            expect,
+            "抽牌 x = rpx(2520 − m)",
+            fit.rpx(2520f - Geom.marginPx),
             Geom.tapDraw().first,
         )
         // 边距 0 时同一个点在哪：两者差 ≈ s·152 ≈ 130 px
