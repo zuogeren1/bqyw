@@ -90,9 +90,11 @@ def main():
         wmax = max(r.shape[1] for r in rows)
         rows = [np.hstack([r, np.full((r.shape[0], wmax - r.shape[1], 3), 30, np.uint8)])
                 for r in rows]
-        os.makedirs(os.path.join(ROOT, ".work"), exist_ok=True)
+        # 过程图统一放本地笔记目录，仓库里不留工作目录
+        gallery = os.path.join(ROOT, ".notes", "_scratch", "work")
+        os.makedirs(gallery, exist_ok=True)
         cv2.imencode(".png", np.vstack(rows))[1].tofile(
-            os.path.join(ROOT, ".work", "tpl_gallery.png"))
+            os.path.join(gallery, "tpl_gallery.png"))
     print("模板已写入", OUT)
 
 
