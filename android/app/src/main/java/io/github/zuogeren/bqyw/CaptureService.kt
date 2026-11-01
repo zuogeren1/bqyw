@@ -558,6 +558,8 @@ class CaptureService : Service() {
         "max" -> "max_attempts"
         "round2" -> "round2"
         "no_round" -> "round_unknown"
+        // 开机自检发现实际布局和 Fit/边距算出来的对不上（比例不认识、边距填错）
+        "no_layout" -> "layout_mismatch"
         "noframe" -> "bad_frame"
         "enemy_ban" -> "enemy_ban"
         "error" -> "error"

@@ -36,6 +36,25 @@ class Bot(
 
     private var startedAt = 0L
 
+    // ------------------------------------------------------------ 布局自检
+    //
+    // 开跑后头几帧做一次：用卡牌行的白带反推 (s, ox)、用抽牌按钮的青色左沿反推边距 m，
+    // 和 Fit / 输入框算出来的对一遍（见 [Layout]）。差得离谱就停手 —— 说明这台机器的
+    // 比例或边距和模型对不上，再点也是点空。量不出来（牌桌空、按钮是灰的）就过一会儿再试，
+    // 试满 [LAYOUT_TRIES] 帧还是量不到，就写一行日志、按公式继续跑。
+    //
+    // 实测边距只用来**核对**，不覆盖输入框：公式值来自两台机器的标定，比这一帧里的
+    // 色值判据稳（实测差 1.5 px 量级）。真差到容差外就是输错了，停手让人自己改。
+
+    /** 自检做完了（量到了，或者放弃量了）。 */
+    private var layoutDone = false
+
+    /** 已经试过几帧。 */
+    private var layoutTries = 0
+
+    /** 逐行取像素用的缓冲，按宽度复用。 */
+    private var layoutRow = IntArray(0)
+
     // ------------------------------------------------------------ 点击节拍
     //
     // 游戏抽牌有冷却（实测 ≈1.38s）。三种错法都踩过：
@@ -144,6 +163,15 @@ class Bot(
                 continue
             }
             noFrame = 0
+
+            // 开局自检：只在头几帧做，量到或放弃为止
+            if (!layoutDone) {
+                val stop = checkLayout(bmp)
+                if (stop != null) {
+                    bmp.recycle()
+                    return stop
+                }
+            }
 
             // 弹窗盖住了画面：先确认掉，这时候读什么都是错的（整块白）
             if (isModal(bmp)) {
@@ -664,6 +692,52 @@ class Bot(
         return r > 200 && g > 200 && b < 80
     }
 
+    /**
+     * 开局布局自检：从当前帧反推 (s, ox, 边距)，和公式对账。
+     *
+     * 返回非 null = 要停手（原因码 "no_layout"）；返回 null = 继续跑（量到了且一致、
+     * 或者这次没量到）。
+     */
+    private fun checkLayout(bmp: Bitmap): String? {
+        layoutTries++
+        val w = bmp.width
+        val h = bmp.height
+        if (layoutRow.size != w) layoutRow = IntArray(w)
+        val row = layoutRow
+        val got = try {
+            Layout.measure(w, h) { y ->
+                bmp.getPixels(row, 0, w, 0, y, w, 1)
+                row
+            }
+        } catch (e: Throwable) {
+            // 取像素失败（回收了 / 尺寸怪）不是错误，当"没量到"处理
+            null
+        }
+        if (got == null) {
+            if (layoutTries >= LAYOUT_TRIES) {
+                layoutDone = true
+                log("   布局自检：这次没量到（牌桌空 / 抽牌按钮不是亮的），按公式继续")
+            }
+            return null
+        }
+        layoutDone = true
+        val fit = Fit(w, h)
+        val m = Geom.marginPx
+        val v = Layout.compare(got, fit.s, fit.ox, m)
+        var line = "   布局自检：公式 " + Layout.brief(fit.s, fit.ox, m) +
+            " ｜ 实测 " + Layout.brief(got.s, got.ox, got.m) + " ｜ " + v.detail
+        if (v.ok && got.hasMargin && Math.abs(got.m - m) > 2f) {
+            // 用量出来的数给个提示；不改输入框（见字段区注释）
+            line += "（实测边距比输入值" + String.format(Locale.US, "%+.1f", got.m - m) + " px，按输入值继续）"
+        }
+        log(line)
+        if (v.ok) return null
+        log("   [!] 比例/边距和模型对不上，这台机器可能不支持：" + v.detail +
+            "。已停手，没有点任何一个按钮 —— 把游戏内的「边距」改成输入框里的数，" +
+            "或者按实测值改输入框，再试。")
+        return "no_layout"
+    }
+
     private fun shot(): Bitmap? = engine.frame()
 
     /** 抓一帧数翻开的张数；抓不到画面就返回 null，调用方跳过判定、别记点空。 */
@@ -730,6 +804,9 @@ class Bot(
 
         /** 多长一段连续黄才算弹窗（屏幕像素）：确认键本身 433 px 宽，20 px 留足余量。 */
         const val MODAL_RUN = 20
+
+        /** 开局布局自检最多试几帧：牌桌空 / 按钮灰时量不出来，等牌翻出来再量。 */
+        const val LAYOUT_TRIES = 60
     }
 }
 
