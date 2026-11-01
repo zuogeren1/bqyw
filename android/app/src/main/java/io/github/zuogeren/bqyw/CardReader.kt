@@ -13,8 +13,9 @@ import kotlin.math.min
  */
 object CardReader {
 
-    private const val CX0 = 392f
-    private const val STEP = 362.75f
+    /** 卡槽数字中心：cx = CX0 + STEP * i。立绘框也按它定位，见 [Enemies.ART_DX0]。 */
+    const val CX0 = 392f
+    const val STEP = 362.75f
     private const val HALF = 35f
     private const val Y0 = 300f
     private const val Y1 = 360f

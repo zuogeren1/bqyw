@@ -27,6 +27,7 @@ import android.widget.TextView
  *  - 牌型页：9 个标准牌型 + 自定义，都能多选，达成其中任意一个就停手
  *  - 自定义页：可以写好几组，每组 1~5 张，达成任意一组就停手
  *  - 点数页：改某一组里的某一格（点数 / 花色 / 「不抽」）
+ *  - 敌人页：黑白名单，按战力点分组、点一下勾/取消，另有「试认」入口
  *
  * 全部用面板内展开的选项网格，不弹系统下拉框——悬浮窗里弹窗容易抢焦点。
  */
@@ -51,16 +52,36 @@ class Overlay(private val ctx: Context) {
     /** 自定义目标，每组 1~5 张；达成任意一组就停手。 */
     private val groups = ArrayList<Group>()
 
+    /**
+     * 敌人名单：模式 + 勾上的名字。
+     *
+     * 和 SharedPreferences 里那份同步 —— 开跑时 CaptureService 读的就是它，
+     * 所以这里改完直接生效，不用重开 App。
+     */
+    private var enemyMode = Enemies.MODE_OFF
+    private val enemySel = LinkedHashSet<String>()
+
+    /** 敌人目录（只读 json，不解码立绘），第一次进「敌人」页时才读一次。 */
+    private var catalog: List<Enemy>? = null
+
     init {
         // 默认口径跟 1.1.0 保持一致：老版本一打开就是「自定义 3 2 5 任 任」，
         // 点开始就能跑。改成空的等于每次都要先勾一下，没必要。
         customOn = true
         groups.add(Group.legacy())
+        // 名单重启 App 后还在：这里读回来，改完立刻写回
+        val saved = EnemyStore.load(ctx)
+        enemyMode = saved.mode
+        enemySel.addAll(saved.names)
     }
 
     private var ordered = false
 
     private var mode = MODE_MAIN
+
+    /** 上一次渲染的是哪一页：敌人页 25 项，点一下不能把滚动条弹回顶部。 */
+    private var lastMode = -1
+
     private var editGroup = 0
     private var editSlot = 0
     private var status: TextView? = null
@@ -161,6 +182,9 @@ class Overlay(private val ctx: Context) {
     // ------------------------------------------------------------ 渲染
     private fun render() {
         val b = body ?: return
+        // 敌人页有 25 项：同一页里点勾选只是重画，别把滚动位置丢了
+        val keep = if (mode == MODE_ENEMY && lastMode == MODE_ENEMY) scroll?.scrollY ?: 0 else 0
+        lastMode = mode
         b.removeAllViews()
         // 旧的 status 已经不在面板上了，别再让轮询往它身上写
         status = null
@@ -170,9 +194,12 @@ class Overlay(private val ctx: Context) {
             MODE_HAND -> renderHandList(b)
             MODE_GROUPS -> renderGroupList(b)
             MODE_SLOT -> renderSlotList(b)
+            MODE_ENEMY -> renderEnemy(b)
             else -> renderMain(b)
         }
         fitOnScreen()
+        // 高度要等这一帧布局完才定，滚回去得等下一轮
+        if (keep > 0) scroll?.post { scroll?.scrollTo(0, keep) }
     }
 
     private fun renderMain(b: LinearLayout) {
@@ -187,6 +214,10 @@ class Overlay(private val ctx: Context) {
                 render()
             })
         }
+        b.addView(button("敌人名单：" + enemyLabel(), wide = true) {
+            mode = MODE_ENEMY
+            render()
+        })
 
         // 摘要和真正开跑用的是同一个 Targets.combine，选了什么、按什么顺序追一眼能看到
         b.addView(summaryView())
@@ -355,6 +386,108 @@ class Overlay(private val ctx: Context) {
             mode = MODE_GROUPS
             render()
         })
+    }
+
+    /**
+     * 敌人页：顶部三档（关 / 黑名单 / 白名单），下面按战力点分组列出全部敌人。
+     *
+     * 每一项是「缩略图 + 名字 + 勾选状态」，点一下切换。名单存 SharedPreferences，
+     * 开跑时 CaptureService 读的是同一份 —— 这里改完直接生效，不用重开 App。
+     */
+    private fun renderEnemy(b: LinearLayout) {
+        b.addView(label("敌人名单（点一下勾 / 取消；白名单只留勾上的）"))
+        val chips = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        chips.addView(cell("关", 54, on = enemyMode == Enemies.MODE_OFF) {
+            setEnemyMode(Enemies.MODE_OFF)
+        })
+        chips.addView(cell("黑名单", 74, on = enemyMode == Enemies.MODE_BAN) {
+            setEnemyMode(Enemies.MODE_BAN)
+        })
+        chips.addView(cell("白名单", 74, on = enemyMode == Enemies.MODE_ONLY) {
+            setEnemyMode(Enemies.MODE_ONLY)
+        })
+        b.addView(chips)
+
+        val all = enemies()
+        if (all.isEmpty()) {
+            b.addView(label("没读到模板（assets/enemies/enemies.json 缺了）"))
+            b.addView(button("返回", wide = true) { backToMain() })
+            return
+        }
+        b.addView(label("已勾 " + enemySel.size + " 个 / 共 " + all.size + " 个"))
+        for (p in 1..5) {
+            val list = all.filter { it.point == p }
+            if (list.isEmpty()) continue
+            b.addView(label(p.toString() + " 点（" + list.size + " 个）"))
+            for (e in list) b.addView(enemyCell(e))
+        }
+        b.addView(button("试认：看这 5 张是谁", wide = true) {
+            val svc = CaptureService.instance
+            if (svc == null) BotLog.add("[!] 服务没在跑，先回 App 授权抓屏")
+            else svc.probeEnemiesFromUi()
+        })
+        b.addView(button("返回", wide = true) { backToMain() })
+    }
+
+    /** 一行敌人：缩略图 + 名字 + 勾选状态，整行都能点。 */
+    private fun enemyCell(e: Enemy): LinearLayout {
+        val on = enemySel.contains(e.name)
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(px(4), px(2), px(4), px(2))
+            background = chip(on)
+            layoutParams = LinearLayout.LayoutParams(px(222), px(34)).apply {
+                topMargin = px(3)
+                marginEnd = px(3)
+            }
+        }
+        row.addView(ImageView(ctx).apply {
+            setImageBitmap(Enemies.thumb(ctx.assets, e.art))
+            scaleType = ImageView.ScaleType.FIT_XY
+            layoutParams = LinearLayout.LayoutParams(px(30), px(30)).apply { marginEnd = px(6) }
+        })
+        row.addView(TextView(ctx).apply {
+            text = e.name
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            gravity = Gravity.CENTER_VERTICAL
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        })
+        row.addView(TextView(ctx).apply {
+            text = if (on) "✓" else "○"
+            setTextColor(if (on) Color.parseColor("#FF7AC8FF") else Color.parseColor("#66FFFFFF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
+        })
+        row.setOnClickListener { toggleEnemy(e.name) }
+        return row
+    }
+
+    private fun enemies(): List<Enemy> =
+        catalog ?: Enemies.catalog(ctx.assets).also { catalog = it }
+
+    private fun setEnemyMode(m: String) {
+        enemyMode = m
+        saveEnemy()
+        render()
+    }
+
+    private fun toggleEnemy(name: String) {
+        if (!enemySel.add(name)) enemySel.remove(name)
+        saveEnemy()
+        render()
+    }
+
+    private fun saveEnemy() = EnemyStore.save(ctx, EnemyPolicy(enemyMode, enemySel.toList()))
+
+    private fun enemyLabel(): String = EnemyPolicy(enemyMode, enemySel.toList()).label()
+
+    private fun backToMain() {
+        mode = MODE_MAIN
+        render()
     }
 
     // ------------------------------------------------------------ 选项
@@ -644,6 +777,7 @@ class Overlay(private val ctx: Context) {
         const val MODE_HAND = 1
         const val MODE_SLOT = 2
         const val MODE_GROUPS = 3
+        const val MODE_ENEMY = 4
 
         /** 牌型页的顺序：倍率从高到低，和判定优先级、PC 版的勾选清单一致。 */
         val HAND_ORDER = listOf(

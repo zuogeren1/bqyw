@@ -11,9 +11,9 @@ android {
         applicationId = "io.github.zuogeren.bqyw"
         minSdk = 29
         targetSdk = 36
-        // 版本号跟 PC 版保持一致：1.1.3 -> 112
-        versionCode = 112
-        versionName = "1.1.3"
+        // 版本号跟 PC 版保持一致：1.2.0 -> 120（敌人黑白名单这一版）
+        versionCode = 120
+        versionName = "1.2.0"
     }
 
     // 启动头要打版本号（BuildConfig.VERSION_NAME），别让它和 versionName 各写一份
@@ -46,4 +46,6 @@ kotlin {
 dependencies {
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
+    // 本地 JVM 单测（src/test）：只验算 EnemyFeat 的数学，不碰 Android API
+    testImplementation("junit:junit:4.13.2")
 }

@@ -12,6 +12,10 @@ class Bot(
     private val engine: Engine,
     private val target: TargetBase,
     private val maxAttempts: Int,
+    /** 敌人名单；关着时是 [EnemyPolicy.OFF]，完全不碰模板。 */
+    private val enemy: EnemyPolicy = EnemyPolicy(),
+    /** 敌人模板库；名单开着才由 CaptureService 建好传进来。 */
+    private val book: Enemies.Book? = null,
     private val log: (String) -> Unit,
 ) {
 
@@ -58,6 +62,38 @@ class Bot(
     private var tapMs = 0L
     private var waitMs = 0L
     private var forfeitMs = 0L
+
+    // ------------------------------------------------------------ 敌人名单
+    //
+    // 判定点就在每次抽牌之后：认的是立绘，命中黑名单（或不在白名单）就放弃重开。
+    // **不睡、不额外抓屏**：主循环本来就抓了这一帧，认牌只用同一份像素；
+    // 认不清的记进 enemyPending，等下一张牌翻出来时顺带一起认 —— 那时翻牌动画
+    // 也早走完了，分数只会更高。所以识别对节拍零影响。
+    //
+    // **一眼不够清楚的两帧定案**：≥ CONFIRM_NCC 直接弃；0.78~0.88 先记进
+    // enemyConfirm，下一帧还是同一个敌人才弃 —— 这一段多半是半张立绘，宁可晚弃一张。
+    // 认不出就当没这个敌人：认不出不弃，绝不乱弃。
+
+    /** 这一轮已经认完的槽位。按槽位记而不是记个数：中间有张牌没认出来也照样补认。 */
+    private val enemyDone = BooleanArray(5)
+
+    /** 没认出来的牌：槽位 → 目前最高分。 */
+    private val enemyPending = HashMap<Int, Float>()
+
+    /** 看着像、但分数不够硬的：槽位 → (敌人名字, 分数)。 */
+    private val enemyConfirm = HashMap<Int, Pair<String, Float>>()
+
+    /** 上一帧有牌的张数，用来判断牌桌是不是被清空过。 */
+    private var enemyChecked = 0
+
+    /** 最近一次命中名单时的立绘分数（写日志用）。 */
+    private var enemyHitScore = 0f
+
+    /** 连续因为名单放弃了几轮。连着撞满 MAX_DROPS 就停手。 */
+    private var enemyStreak = 0
+
+    /** 累计因为名单放弃的轮数，写进结束摘要。 */
+    private var enemyDrops = 0
 
     interface Engine {
         fun frame(): Bitmap?
@@ -155,15 +191,24 @@ class Bot(
             val tCards = System.nanoTime()
             val cards = CardReader.readCards(bmp)
             readMs += msSince(tCards)
-            bmp.recycle()
             val pts = cards.map { it.point }.toIntArray()
             val filled = pts.count { it > 0 }
+            // 刚放弃完的一小段时间里，牌桌上的牌可能是正在淡出的旧牌，读到不算数
+            val fading = filled > 0 && System.currentTimeMillis() < calmUntil
+            // 敌人名单：就用这一帧认，不睡也不额外抓屏（淡出中的旧牌不认）
+            var banned: String? = null
+            if (!fading) {
+                val tEnemy = System.nanoTime()
+                banned = checkEnemies(bmp, cards, filled)
+                readMs += msSince(tEnemy)
+            }
+            bmp.recycle()
             // 只统计真翻出来的牌（不是点击次数），结束摘要里的「张牌」按这个算
             if (filled > prevCards) cardsDrawn += filled - prevCards
             prevCards = filled
             // 点击节拍：多出一张就慢慢回收，点空了就往上抬（跨轮保持，别每轮重置）
             updateBeat(filled)
-            if (filled > 0 && System.currentTimeMillis() < calmUntil) {
+            if (fading) {
                 sleep(120)
                 continue
             }
@@ -185,6 +230,27 @@ class Bot(
                     "  战力点 " + pts.sum() + "  预估奖励点 " + Hands.score(drawn))
                 engine.beep()
                 return "hit"
+            }
+            // ---- 敌人名单命中：立刻放弃重开，不等抽满、也不等牌型判完
+            if (banned != null) {
+                enemyDrops++
+                enemyStreak++
+                val what = if (enemy.mode == Enemies.MODE_ONLY) "不在白名单" else "命中黑名单"
+                log("     " + what + "「" + banned + "」（立绘 " +
+                    f(enemyHitScore.toDouble(), 2) + "），放弃重开")
+                if (enemyStreak >= Enemies.MAX_DROPS) {
+                    log("\n[!] 连着 " + enemyStreak + " 轮都撞名单，大概率是名单配得太宽，已停止。")
+                    return "enemy_ban"
+                }
+                flushEnemyPending()
+                if (roundStillOne()) {
+                    forfeit()
+                } else {
+                    // 第二轮按放弃等于退出整场演算，读不准就再等一圈
+                    log("   [!] 轮次复核没通过，先不放弃")
+                }
+                calmUntil = System.currentTimeMillis() + 1500
+                continue
             }
             if (filled < stop) {
                 if (filled == 0) {
@@ -265,6 +331,8 @@ class Bot(
             }
             lastHand = handKey
             lastHandAt = now
+            // 抽满这一轮都没撞名单，连着撞的计数清零
+            enemyStreak = 0
             attempts++
             // 短自定义目标命中时手上还不到 5 张，牌型也只能按实际抽到的牌算
             val hand = Hands.best(drawn)
@@ -313,7 +381,94 @@ class Bot(
                 .append(" 次/张）")
         }
         sb.append("，点击节拍 ").append(f(clickDelay, 2)).append(" s")
+        if (enemyDrops > 0) {
+            sb.append("，因名单弃 ").append(enemyDrops).append(" 轮")
+        }
         return sb.toString()
+    }
+
+    // ------------------------------------------------------------ 敌人名单
+
+    /**
+     * 把这一帧的牌对一遍敌人名单；确认命中就返回敌人名字。
+     *
+     * [filled] 是这一帧翻开的张数（CardReader 永远给 5 格，没翻开的是 point = 0）。
+     * 认不清的记进 enemyPending，等下一张牌翻出来、主循环本来就抓了新帧时顺带一起认；
+     * 一帧只比一次，算的是同一份像素，所以识别对节拍零影响。
+     */
+    private fun checkEnemies(bmp: Bitmap, cards: List<Card>, filled: Int): String? {
+        val bk = book ?: return null
+        if (!enemy.active()) return null
+        if (filled < enemyChecked) {
+            // 牌桌被清空过：上一轮没认出的作废
+            flushEnemyPending()
+            enemyChecked = 0
+        }
+        // 这一帧要认的：新翻出来的 + 没认清的 + 看着像、等确认的
+        val todo = ArrayList<Int>(5)
+        for (i in 0 until minOf(filled, cards.size)) {
+            if (!enemyDone[i]) todo.add(i)
+        }
+        for (i in enemyPending.keys.sorted()) {
+            if (i !in todo) todo.add(i)
+        }
+        for (i in enemyConfirm.keys.sorted()) {
+            if (i !in todo) todo.add(i)
+        }
+        enemyChecked = filled
+        for (i in todo) {
+            if (i >= cards.size) continue
+            val point = cards[i].point
+            if (point <= 0) {
+                // 这张还没翻开：等下一帧
+                enemyPending.remove(i)
+                enemyConfirm.remove(i)
+                continue
+            }
+            val hit = bk.best(bmp, i, point)
+            val score = hit?.score ?: 0f
+            if (hit == null || score < bk.threshold) {
+                // 分数留着，只涨不跌：下一帧是更晚的画面，认得更清
+                enemyDone[i] = false
+                enemyPending[i] = maxOf(score, enemyPending[i] ?: 0f)
+                enemyConfirm.remove(i)
+                continue
+            }
+            enemyDone[i] = true
+            enemyPending.remove(i)
+            if (!enemy.shouldDrop(hit.name)) {
+                // 认出来了但不在名单里，不用再确认
+                enemyConfirm.remove(i)
+                continue
+            }
+            if (score >= Enemies.CONFIRM_NCC) {
+                // 一眼就够清楚
+                enemyHitScore = score
+                return hit.name
+            }
+            val seen = enemyConfirm[i]
+            if (seen != null && seen.first == hit.name) {
+                // 下一帧还是同一个敌人 → 确认
+                enemyHitScore = score
+                return hit.name
+            }
+            // 先记下，下一帧再定
+            enemyConfirm[i] = hit.name to score
+        }
+        return null
+    }
+
+    /** 一轮结束：还没认出来的牌各记一行日志，本轮的认牌账清零。 */
+    private fun flushEnemyPending() {
+        for (i in enemyPending.keys.sorted()) {
+            log(
+                "     第 " + (i + 1) + " 张一直没认出来（最像 " +
+                    f(enemyPending.getValue(i).toDouble(), 2) + "）",
+            )
+        }
+        enemyPending.clear()
+        enemyConfirm.clear()
+        enemyDone.fill(false)
     }
 
     // ------------------------------------------------------------ 节拍

@@ -209,6 +209,25 @@ class CaptureService : Service() {
             return
         }
 
+        // 敌人名单：关着就**完全不加载模板**（零开销）；名单非空才把 25 张立绘读进来
+        var policy = EnemyStore.load(this)
+        var book: Enemies.Book? = null
+        if (policy.active()) {
+            val b = Enemies.Book(assets)
+            if (!b.ready) {
+                BotLog.add("   [!] 敌人模板没装上（assets/enemies/enemies.json），名单不生效")
+                policy = EnemyPolicy.OFF
+            } else {
+                book = b
+                // 和 PC 版同一个写法：「敌人名单：黑名单：精锐行刑人」
+                BotLog.add("敌人名单：" + policy)
+                val miss = policy.names.filter { n -> n !in b.names() }
+                if (miss.isNotEmpty()) {
+                    BotLog.add("   [!] 这些名字模板库里没有，永远不会命中：" + miss.joinToString("、"))
+                }
+            }
+        }
+
         val dm = resources.displayMetrics
         Geom.setScreen(
             maxOf(dm.widthPixels, dm.heightPixels),
@@ -248,7 +267,7 @@ class CaptureService : Service() {
                     return@Thread
                 }
                 BotLog.add("点按方式：" + Tap.current())
-                bot = Bot(engine, target, maxAttempts) { BotLog.add(it) }
+                bot = Bot(engine, target, maxAttempts, policy, book) { BotLog.add(it) }
                 reason = bot.run()
             } catch (e: Throwable) {
                 BotLog.add("   [!] 异常：" + e.javaClass.simpleName + " " + (e.message ?: ""))
@@ -283,6 +302,105 @@ class CaptureService : Service() {
         BotLog.add("停止：收到停止指令")
     }
 
+    /**
+     * 「试认」：把当前 5 张牌各自认成谁、几分写进日志。
+     *
+     * 真机调试就靠它：框对了分数应该 0.85 以上、最优偏移接近 0；
+     * 最优偏移明显不为 0，就说明 Enemies 里那几个 ART_D* 常量要跟着挪（基准像素）。
+     * 名单关着也能试认 —— 校准不需要先把名单打开。
+     */
+    fun probeEnemiesFromUi() {
+        if (botRunning) {
+            BotLog.add("[!] 先停下来再试认（机器人跑着的时候画面一直在变）")
+            return
+        }
+        if (reader == null) {
+            BotLog.add("[!] 还没授权抓屏，先在 App 里点「授权抓屏」")
+            return
+        }
+        Thread {
+            val policy = EnemyStore.load(this)
+            val book = Enemies.Book(assets)
+            if (!book.ready) {
+                BotLog.add("[!] 敌人模板没装上（assets/enemies/enemies.json），名单不生效")
+                return@Thread
+            }
+            val bmp = grabBitmap()
+            if (bmp == null) {
+                BotLog.add("[!] 试认：拿不到画面")
+                return@Thread
+            }
+            try {
+                // 服务刚起来时卡头模板可能还没载（load 是幂等的）
+                CardReader.load(assets)
+                Badge.load(assets)
+                val fit = Fit(bmp.width, bmp.height)
+                val cards = CardReader.readCards(bmp)
+                BotLog.add(
+                    "试认：名单 " + policy.label() + "，模板 " + book.size +
+                        " 个，阈值 " + num(book.threshold) + "，坐标缩放 " + num3(fit.s),
+                )
+                // 框本身也打出来：真机上量一下实际像素就知道差多少
+                val r0 = book.rectOf(bmp, 0)
+                BotLog.add(
+                    "     立绘框（基准 x=中心" + fmt(Enemies.ART_DX0) + "…" + fmt(Enemies.ART_DX1) +
+                        "，y " + fmt(Enemies.ART_DY0) + "…" + fmt(Enemies.ART_DY1) +
+                        "）第 1 张实际像素 " + r0.left + "," + r0.top + " → " +
+                        r0.right + "," + r0.bottom,
+                )
+                var seen = 0
+                for (i in 0 until 5) {
+                    val point = cards.getOrNull(i)?.point ?: 0
+                    if (point <= 0) {
+                        BotLog.add("     第 " + (i + 1) + " 张：没翻开")
+                        continue
+                    }
+                    seen++
+                    val hit = book.best(bmp, i, point)
+                    if (hit == null) {
+                        BotLog.add("     第 " + (i + 1) + " 张（" + point + " 点）：认不出（裁不出立绘？）")
+                        continue
+                    }
+                    val over = hit.score >= book.threshold
+                    val sb = StringBuilder("     第 ").append(i + 1).append(" 张（")
+                        .append(point).append(" 点）：")
+                    if (over) {
+                        sb.append(hit.name).append("（立绘 ").append(num(hit.score)).append("）")
+                        if (policy.active()) {
+                            sb.append(if (policy.shouldDrop(hit.name)) " → 弃" else " → 留")
+                        }
+                    } else {
+                        sb.append("最像 ").append(hit.name).append("（").append(num(hit.score))
+                            .append("），没到阈值")
+                    }
+                    BotLog.add(sb.toString())
+                    val probe = book.bestOffset(bmp, i, point)
+                    BotLog.add(
+                        "        最优偏移 dx=" + fmt(probe.second) + " dy=" + fmt(probe.third) +
+                            " 分数 " + num(probe.first) + "（默认框 " + num(hit.score) + "）",
+                    )
+                }
+                if (seen == 0) BotLog.add("     牌桌是空的：先抽几张牌再试认")
+            } catch (e: Throwable) {
+                BotLog.add("[!] 试认失败：" + e.javaClass.simpleName + " " + (e.message ?: ""))
+            } finally {
+                bmp.recycle()
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /** 偏移量写法：带符号整数（基准像素）。 */
+    private fun fmt(v: Float): String = String.format(Locale.US, "%+.0f", v)
+
+    /** 分数写法：两位小数。 */
+    private fun num(v: Float): String = String.format(Locale.US, "%.2f", v)
+
+    /** 缩放写法：三位小数。 */
+    private fun num3(v: Float): String = String.format(Locale.US, "%.3f", v)
+
     /** 结束原因，和 PC 版同一个词表。 */
     private fun reasonCode(reason: String): String = when (reason) {
         "hit" -> "hit"
@@ -291,6 +409,7 @@ class CaptureService : Service() {
         "round2" -> "round2"
         "no_round" -> "round_unknown"
         "noframe" -> "bad_frame"
+        "enemy_ban" -> "enemy_ban"
         "error" -> "error"
         // no_tap / stuck / stuck_draw：都是「没法继续」，归到 aborted
         else -> "aborted"
