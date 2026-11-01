@@ -18,6 +18,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
+import kotlin.math.roundToInt
 import java.io.File
 import java.util.Locale
 
@@ -233,6 +234,9 @@ class CaptureService : Service() {
             maxOf(dm.widthPixels, dm.heightPixels),
             minOf(dm.widthPixels, dm.heightPixels),
         )
+        // 边距补偿：悬浮球里填的值（存 SharedPreferences）。每次开跑读一次 ——
+        // 面板里改完立刻生效，不用重开 App
+        Geom.setMargin(MarginStore.load(this))
         // 画面尺寸写实际抓屏帧的，坐标缩放就是 Geom / Fit 正在用的那个
         val capW = reader?.width ?: 0
         val capH = reader?.height ?: 0
@@ -252,6 +256,12 @@ class CaptureService : Service() {
         BotLog.add(
             "画面 " + capW + "×" + capH + "（" + BotLog.aspect(capW, capH) +
                 "），坐标缩放 " + String.format(Locale.US, "%.3f", Fit(capW, capH).s),
+        )
+        // 边距为 0 时这两个坐标就是老版本的值，和以前的行一模一样
+        BotLog.add(
+            "边距 " + Geom.margin + "（基准内缩 " + num1(Geom.marginPx) + " px）：" +
+                "抽牌 @(" + Geom.tapDraw().first + ", " + Geom.tapDraw().second + ")" +
+                "  放弃 @(" + Geom.tapForfeit().first + ", " + Geom.tapForfeit().second + ")",
         )
         botThread = Thread {
             var reason = "aborted"
@@ -400,6 +410,137 @@ class CaptureService : Service() {
 
     /** 缩放写法：三位小数。 */
     private fun num3(v: Float): String = String.format(Locale.US, "%.3f", v)
+
+    /** 一位小数（边距折算出来的基准像素用）。 */
+    private fun num1(v: Float): String = String.format(Locale.US, "%.1f", v)
+
+    /** 不带符号的整数（基准坐标用）。 */
+    private fun n0(v: Float): String = String.format(Locale.US, "%.0f", v)
+
+    /**
+     * 「校准」：把和边距有关的几个数一次写进日志，边距填错了靠这个一眼看出来。
+     *
+     * 三样：当前边距折算出的基准像素、补偿后的点击坐标（抽牌 / 放弃 / 弹窗确认）、
+     * 轮次徽章读出来是 1 / 2 / 读不出；最后再用画面自己量一遍内缩量（抽牌按钮的
+     * 青色左沿，边距 0 时固定在基准 x=2405，见 [Geom.DRAW_EDGE]）。
+     *
+     * 徽章读数是最灵的判据：窗口只有 19×40，m 差 10 px 以上窗口里就没字了
+     * （实测只能偏 −11…+20 px），所以「徽章读得出 1」基本等于「边距填对了」。
+     */
+    fun probeMarginFromUi() {
+        if (botRunning) {
+            BotLog.add("[!] 先停下来再校准（机器人跑着的时候画面一直在变）")
+            return
+        }
+        if (reader == null) {
+            BotLog.add("[!] 还没授权抓屏，先在 App 里点「授权抓屏」")
+            return
+        }
+        Thread {
+            val bmp = grabBitmap()
+            if (bmp == null) {
+                BotLog.add("[!] 校准：拿不到画面")
+                return@Thread
+            }
+            try {
+                // 服务刚起来时模板可能还没载（load 是幂等的）
+                Badge.load(assets)
+                CardReader.load(assets)
+                val fit = Fit(bmp.width, bmp.height)
+                val m = Geom.marginPx
+                val d = Geom.tapDraw()
+                val f = Geom.tapForfeit()
+                val c = Geom.tapConfirm()
+                BotLog.add(
+                    "校准：边距 " + Geom.margin + " → 基准内缩 " + num1(m) +
+                        " px（k = " + Geom.MARGIN_K + "），画面 " +
+                        bmp.width + "×" + bmp.height + "，缩放 " + num3(fit.s),
+                )
+                BotLog.add(
+                    "     抽牌 " + n0(Geom.DRAW[0]) + " − " + n0(m) + " = " + n0(Geom.DRAW[0] - m) +
+                        " → 屏幕 (" + d.first + ", " + d.second + ")" +
+                        "   放弃 " + n0(Geom.FORFEIT[0]) + " − " + n0(m) + " = " +
+                        n0(Geom.FORFEIT[0] - m) + " → 屏幕 (" + f.first + ", " + f.second + ")",
+                )
+                BotLog.add(
+                    "     弹窗确认 " + n0(Geom.CONFIRM[0]) + "（居中，不动）→ 屏幕 (" +
+                        c.first + ", " + c.second + ")",
+                )
+                val rnd = Badge.read(bmp)
+                val win = Badge.window(bmp.width, bmp.height)
+                val rndText = when (rnd) {
+                    1 -> "1（第 1 轮）"
+                    2 -> "2（不是第 1 轮，这时候「放弃挑战」＝退出整场演算）"
+                    else -> "读不出"
+                }
+                val info = if (Badge.lastInfo.isEmpty()) "" else "（" + Badge.lastInfo + "）"
+                BotLog.add(
+                    "     轮次徽章：" + rndText + "   窗口 " +
+                        win[0] + "," + win[1] + " → " + win[2] + "," + win[3] + info,
+                )
+                val real = measureMargin(bmp, fit)
+                val realText = if (real == null) {
+                    "量不出（抽牌按钮不是亮的青色：牌抽满了 / 不在抽牌页）"
+                } else {
+                    num1(real) + " px（按边距算是 " + num1(m) + "），抽牌按钮青色左沿 " +
+                        n0(Geom.DRAW_EDGE - real) + "（边距 0 时是 " + n0(Geom.DRAW_EDGE) + "）"
+                }
+                BotLog.add("     实测内缩：" + realText)
+            } catch (e: Throwable) {
+                BotLog.add("[!] 校准失败：" + e.javaClass.simpleName + " " + (e.message ?: ""))
+            } finally {
+                bmp.recycle()
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /**
+     * 用画面里的死数当标尺量真实内缩了多少：抽牌按钮的青色左沿在边距 0 时固定在
+     * 基准 x=2405（refs/安卓端-自定义边距-0.jpg 上量出来的，130 那张量到 2253，差 152）。
+     *
+     * 只在 y=885 这一行里找第一段够长的青色；找不到就返回 null（牌抽满了按钮是灰的、
+     * 不在抽牌页、色值对不上…都算量不出）。**结果只写日志、不自动采用** ——
+     * 色值毕竟是从两张参考图里挑的，宁可让人自己判断。
+     */
+    private fun measureMargin(bmp: Bitmap, fit: Fit): Float? {
+        val y = fit.py(Geom.DRAW[1]).coerceIn(0, bmp.height - 1)
+        // 边距 300 时左沿 = 2405 − 351 = 2054，留够两头
+        val xa = fit.px(1900f).coerceIn(0, bmp.width - 1)
+        val xb = fit.px(2600f).coerceIn(xa, bmp.width - 1)
+        val n = xb - xa + 1
+        if (n < 8) return null
+        val row = IntArray(n)
+        try {
+            bmp.getPixels(row, 0, n, xa, y, n, 1)
+        } catch (e: Throwable) {
+            return null
+        }
+        // 够长的一段：基准 10 px 按缩放换成屏幕像素，太小的画面也别低于 4 px
+        val minRun = (10f * fit.s).roundToInt().coerceAtLeast(4)
+        var run = 0
+        var i = 0
+        while (i < n) {
+            val c = row[i]
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            // 按钮是亮的青蓝色（实测 RGB ≈ 101,193,216 / 118,230,254），背景是灰白
+            if (b - r > 55 && g - r > 45) {
+                run++
+                if (run >= minRun) {
+                    val base = (xa + (i - run + 1) - fit.ox) / fit.s
+                    return Geom.DRAW_EDGE - base
+                }
+            } else {
+                run = 0
+            }
+            i++
+        }
+        return null
+    }
 
     /** 结束原因，和 PC 版同一个词表。 */
     private fun reasonCode(reason: String): String = when (reason) {

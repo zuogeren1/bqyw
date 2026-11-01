@@ -2,6 +2,7 @@ package io.github.zuogeren.bqyw
 
 import android.graphics.Bitmap
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * 抽牌状态机：读牌 → 命中就停 → 没命中就放弃重开。
@@ -614,12 +615,52 @@ class Bot(
         return false
     }
 
-    /** 确认按钮是亮黄色，弹窗一出来就能靠它认。 */
+    /**
+     * 放弃确认弹窗：黄色的确认键一出来就能靠它认。
+     *
+     * 原来是硬采样 (1638,870) 一个点（基准坐标）。**但弹窗自身会不会跟着边距挪没实测过**
+     * （两张边距实测图里都没有弹窗）：真挪了那一点就落到按钮外面，弹窗认不出来，
+     * 后面的等待 / 确认 / 补点全乱。所以改成沿 y=870 在 x∈[1400,1900] 里横扫，
+     * 只要有一段连续够黄就算弹窗在 —— 弹窗动不动都不影响判定：
+     *
+     *  * 确认键本身 433 px 宽（实测 x 1433…1866），边距最多把界面推 351 px，
+     *    无论左移还是右移，这段窗口里都还剩 80 px 以上的黄条；
+     *  * 边距=0 时更简单：黄条就压在原来的那一点上，行为和旧版完全一致；
+     *  * 这一行（y=870）在正常抽牌界面上没有黄色：refs 和 .notes 里上百张历史截图
+     *    逐张按同一判据跑过，非弹窗的全是 0，四张弹窗截图全中（黄条 109~276 px 长）。
+     */
     private fun isModal(bmp: Bitmap): Boolean {
         val fit = Fit(bmp.width, bmp.height)
-        val x = fit.px(1638f).coerceIn(0, bmp.width - 1)
-        val y = fit.py(870f).coerceIn(0, bmp.height - 1)
-        val c = bmp.getPixel(x, y)
+        val y = fit.py(MODAL_Y)
+        if (y < 0 || y >= bmp.height) return false
+        val xa = fit.px(MODAL_X0).coerceIn(0, bmp.width - 1)
+        val xb = fit.px(MODAL_X1).coerceIn(xa, bmp.width - 1)
+        val n = xb - xa + 1
+        val row = IntArray(n)
+        try {
+            bmp.getPixels(row, 0, n, xa, y, n, 1)
+        } catch (e: Throwable) {
+            // 画面被裁过 / 取不到这一行：宁可当没弹窗，别把正常画面当成弹窗反复确认
+            return false
+        }
+        // 采样步长跟着缩放走；「够黄的一段」仍按屏幕像素算
+        val step = (2f * fit.s).roundToInt().coerceAtLeast(1)
+        var run = 0
+        var i = 0
+        while (i < n) {
+            if (isConfirmYellow(row[i])) {
+                run += step
+                if (run >= MODAL_RUN) return true
+            } else {
+                run = 0
+            }
+            i += step
+        }
+        return false
+    }
+
+    /** 确认键的亮黄色（和原来的单点判据完全一致，只是现在扫一整行）。 */
+    private fun isConfirmYellow(c: Int): Boolean {
         val r = (c shr 16) and 0xFF
         val g = (c shr 8) and 0xFF
         val b = c and 0xFF
@@ -683,5 +724,15 @@ class Bot(
         /** 每多出一张牌回落多少，但绝不低于这个下限（贴回 1.25 会一路点空）。 */
         const val CLICK_RECOVER = 0.01
         const val CLICK_DELAY_MIN = 1.40
+
+        /** 弹窗确认键落在这一行上（基准坐标）。原来只认 (1638,870) 一个点，见 [isModal]。 */
+        const val MODAL_Y = 870f
+
+        /** 横扫的左右边界（基准坐标）：比确认键 433 px 的宽度还宽，够容边距把它推到任一侧。 */
+        const val MODAL_X0 = 1400f
+        const val MODAL_X1 = 1900f
+
+        /** 多长一段连续黄才算弹窗（屏幕像素）：确认键本身 433 px 宽，20 px 留足余量。 */
+        const val MODAL_RUN = 20
     }
 }

@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.zuogeren.bqyw"
         minSdk = 29
         targetSdk = 36
-        // 版本号跟 PC 版保持一致：1.2.0 -> 120（敌人黑白名单这一版）
-        versionCode = 120
+        // 版本号跟 PC 版保持一致：1.2.0 -> 121（同一版本号的第二次打包：补边距补偿）
+        versionCode = 121
         versionName = "1.2.0"
     }
 

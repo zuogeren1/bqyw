@@ -7,17 +7,25 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
+import android.text.InputFilter
+import android.text.InputType
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.util.Locale
 
 /**
  * 悬浮球：游戏里也能操作的主界面。
@@ -28,8 +36,12 @@ import android.widget.TextView
  *  - 自定义页：可以写好几组，每组 1~5 张，达成任意一组就停手
  *  - 点数页：改某一组里的某一格（点数 / 花色 / 「不抽」）
  *  - 敌人页：黑白名单，按战力点分组、点一下勾/取消，另有「试认」入口
+ *  - 主面板上还有一行「边距」：填游戏内「边距 / 安全区」的数字，配一个数值输入框、
+ *    ±10 粗调和一个「校准」按钮（把边距折算、补偿后的坐标、轮次读数写进日志）
  *
  * 全部用面板内展开的选项网格，不弹系统下拉框——悬浮窗里弹窗容易抢焦点。
+ * 唯一的例外是边距那个数值输入框：它要打字，所以在聚焦的那一刻才临时把悬浮窗的
+ * FLAG_NOT_FOCUSABLE 摘掉（见 setWindowFocusable），失焦立刻装回去。
  */
 class Overlay(private val ctx: Context) {
 
@@ -64,6 +76,21 @@ class Overlay(private val ctx: Context) {
     /** 敌人目录（只读 json，不解码立绘），第一次进「敌人」页时才读一次。 */
     private var catalog: List<Enemy>? = null
 
+    /**
+     * 边距：游戏内「边距 / 安全区」设置的数字（0~300），0 = 不补偿。
+     *
+     * 和 SharedPreferences 里那份同步 —— 开跑时 CaptureService 读的就是它；这里改完
+     * 直接写进 [Geom]，下一次点击就用新坐标，不用重开 App。
+     */
+    private var borderMargin = 0
+
+    /** 边距输入框 / 它下面那行折算说明；不在主面板上时是 null。 */
+    private var marginField: EditText? = null
+    private var marginTip: TextView? = null
+
+    /** 程序自己在改输入框内容（±10、失焦规整）时，别当成用户在打字再写一遍。 */
+    private var syncingField = false
+
     init {
         // 默认口径跟 1.1.0 保持一致：老版本一打开就是「自定义 3 2 5 任 任」，
         // 点开始就能跑。改成空的等于每次都要先勾一下，没必要。
@@ -73,6 +100,9 @@ class Overlay(private val ctx: Context) {
         val saved = EnemyStore.load(ctx)
         enemyMode = saved.mode
         enemySel.addAll(saved.names)
+        // 边距同理：打开面板就生效（不用等开跑），默认 0 = 不补偿
+        borderMargin = MarginStore.load(ctx)
+        Geom.setMargin(borderMargin)
     }
 
     private var ordered = false
@@ -182,12 +212,19 @@ class Overlay(private val ctx: Context) {
     // ------------------------------------------------------------ 渲染
     private fun render() {
         val b = body ?: return
+        // 正在打字时换页：先把输入焦点、输入法、窗口的「可聚焦」都收回来 ——
+        // 输入框马上要被拆掉，不主动收的话悬浮窗会一直占着键盘焦点，游戏里按键就没反应了
+        marginField?.clearFocus()
+        hideIme()
+        setWindowFocusable(false)
         // 敌人页有 25 项：同一页里点勾选只是重画，别把滚动位置丢了
         val keep = if (mode == MODE_ENEMY && lastMode == MODE_ENEMY) scroll?.scrollY ?: 0 else 0
         lastMode = mode
         b.removeAllViews()
-        // 旧的 status 已经不在面板上了，别再让轮询往它身上写
+        // 旧的 status / 边距控件已经不在面板上了，别再往它们身上写
         status = null
+        marginField = null
+        marginTip = null
         // 换页后面板高度会变，把滚动条退回顶部，不然会停在上一次的偏移上
         scroll?.scrollTo(0, 0)
         when (mode) {
@@ -218,6 +255,13 @@ class Overlay(private val ctx: Context) {
             mode = MODE_ENEMY
             render()
         })
+
+        // 边距：游戏内那个设置不为 0 时，界面不是整体平移，而是按控件锚边反向挪
+        // （贴左 +m、贴右 −m、居中不动），所以得把游戏里的数字抄进来，见 Geom。
+        b.addView(label("边距（游戏内「边距」填几就写几，0 = 不补偿）"))
+        b.addView(marginRow())
+        marginTip = marginTipView()
+        b.addView(marginTip)
 
         // 摘要和真正开跑用的是同一个 Targets.combine，选了什么、按什么顺序追一眼能看到
         b.addView(summaryView())
@@ -490,6 +534,168 @@ class Overlay(private val ctx: Context) {
         render()
     }
 
+    // ------------------------------------------------------------ 边距
+
+    /**
+     * 边距那一行：输入框 + 粗调 ±10 + 「校准」。
+     *
+     * 排版取舍：面板只有 250dp 宽，所以「边距」说明放在上一行当标签，这一行只放
+     * 64dp 的输入框、两个 38dp 的粗调键和一个 52dp 的校准键（合计约 200dp）。
+     * 输入框要弹系统输入法，而悬浮窗默认是 FLAG_NOT_FOCUSABLE（不抢游戏输入的焦点），
+     * 所以只在它聚焦的那一刻临时摘掉那个 flag，见 [setWindowFocusable]；
+     * 万一某个机型上输入法弹不出来，±10 也能把值调到任意 10 的倍数，不至于卡死。
+     */
+    private fun marginRow(): LinearLayout {
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val field = EditText(ctx).apply {
+            setText(borderMargin.toString())
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
+            background = chip(false)
+            inputType = InputType.TYPE_CLASS_NUMBER
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            filters = arrayOf(InputFilter.LengthFilter(3))
+            setSingleLine()
+            setPadding(px(2), 0, px(2), 0)
+            layoutParams = LinearLayout.LayoutParams(px(64), px(34)).apply { marginEnd = px(4) }
+        }
+        // 一边打字一边生效：0~300 内改到哪就是哪，超了按上限算（框里的数字先不动，
+        // 免得刚打到「35」就被改成别的），失焦时再把框规整成真正生效的值
+        field.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (syncingField) return
+                applyMargin(s?.toString().orEmpty())
+            }
+        })
+        field.setOnFocusChangeListener { _, has ->
+            if (has) {
+                setWindowFocusable(true)
+                // 刚摘下 FLAG_NOT_FOCUSABLE 那一下窗口还没重新布局，等一拍再叫输入法
+                handler.post {
+                    setWindowFocusable(true)
+                    // 改窗口 flag 会让窗口重新布局，焦点可能被系统收走，补要一次
+                    if (!field.hasFocus()) field.requestFocus()
+                    runCatching {
+                        imm()?.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
+                    }
+                }
+            } else {
+                hideIme()
+                setWindowFocusable(false)
+                syncingField = true
+                field.setText(borderMargin.toString())
+                field.setSelection(field.text.length)
+                syncingField = false
+            }
+        }
+        field.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                field.clearFocus()
+                true
+            } else {
+                false
+            }
+        }
+        marginField = field
+        row.addView(field)
+        row.addView(cell("-10", 38) { bumpMargin(-10) }.apply {
+            layoutParams = LinearLayout.LayoutParams(px(38), px(34)).apply { marginEnd = px(2) }
+        })
+        row.addView(cell("+10", 38) { bumpMargin(10) }.apply {
+            layoutParams = LinearLayout.LayoutParams(px(38), px(34)).apply { marginEnd = px(4) }
+        })
+        row.addView(button("校准", wide = false) {
+            val svc = CaptureService.instance
+            if (svc == null) {
+                BotLog.add("[!] 服务没在跑，先回 App 授权抓屏")
+            } else {
+                // 校准要看的是游戏画面：先把输入法收掉、焦点还给游戏
+                marginField?.clearFocus()
+                hideIme()
+                svc.probeMarginFromUi()
+            }
+        }.apply { layoutParams = LinearLayout.LayoutParams(px(52), px(34)) })
+        return row
+    }
+
+    /** 边距下面那行小字：折算成基准像素，并直接给出补偿后的两个点击坐标。 */
+    private fun marginTipView(): TextView = TextView(ctx).apply {
+        setTextColor(Color.parseColor("#FF9BD1FF"))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        setPadding(0, px(1), 0, px(3))
+        text = marginTipText()
+    }
+
+    /** [typed] 是输入框里的原始数字：超上限时提示「按 300 算」，但框里的字先不改。 */
+    private fun marginTipText(typed: Int? = null): String {
+        val over = if (typed != null && typed > Geom.MARGIN_MAX) "（超过 300，按 300 算）" else ""
+        if (borderMargin == 0) return "0 = 不补偿，和以前完全一样" + over
+        val m = Geom.marginPx
+        return "基准内缩 " + n0(m) + " px：抽牌 x " + n0(Geom.DRAW[0] - m) +
+            "，放弃 x " + n0(Geom.FORFEIT[0] - m) + over
+    }
+
+    /**
+     * 改边距：钳到 0~300 立刻生效（[Geom] 是全局的，下一次点击就用新坐标），
+     * 同时写进 SharedPreferences，重启 App 还在。
+     */
+    private fun applyMargin(raw: String) {
+        val typed = raw.trim().toIntOrNull()
+        val v = (typed ?: 0).coerceIn(0, Geom.MARGIN_MAX)
+        if (v != borderMargin) {
+            borderMargin = v
+            Geom.setMargin(v)
+            MarginStore.save(ctx, v)
+        }
+        marginTip?.text = marginTipText(typed)
+    }
+
+    /** ±10 粗调：输入法在悬浮窗里不好用时也能把值调到任意 10 的倍数。 */
+    private fun bumpMargin(delta: Int) {
+        val v = (borderMargin + delta).coerceIn(0, Geom.MARGIN_MAX)
+        borderMargin = v
+        Geom.setMargin(v)
+        MarginStore.save(ctx, v)
+        syncingField = true
+        marginField?.setText(v.toString())
+        marginField?.setSelection(v.toString().length)
+        syncingField = false
+        marginTip?.text = marginTipText()
+    }
+
+    /**
+     * 悬浮窗默认带 FLAG_NOT_FOCUSABLE（不抢游戏的输入焦点），代价是里面的 EditText 打不了字。
+     * 只有边距输入框真的聚焦时才临时摘掉这个 flag，失焦 / 收起面板立刻装回去。
+     */
+    private fun setWindowFocusable(on: Boolean) {
+        val p = params ?: return
+        val noFocus = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        val flags = if (on) p.flags and noFocus.inv() else p.flags or noFocus
+        if (flags == p.flags) return
+        p.flags = flags
+        // 输入法顶上来时把面板往上让一让，别盖住输入框
+        p.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+            WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+        runCatching { wm.updateViewLayout(root, p) }
+    }
+
+    private fun imm(): InputMethodManager? =
+        ctx.getSystemService(InputMethodManager::class.java)
+
+    private fun hideIme() {
+        val f = marginField ?: return
+        runCatching { imm()?.hideSoftInputFromWindow(f.windowToken, 0) }
+    }
+
+    /** 不带符号的整数写法（基准像素用）。 */
+    private fun n0(v: Float): String = String.format(Locale.US, "%.0f", v)
+
     // ------------------------------------------------------------ 选项
     private fun pickSlot(p: Int, s: Int) {
         val g = groups.getOrNull(editGroup) ?: return
@@ -713,6 +919,10 @@ class Overlay(private val ctx: Context) {
 
     private fun collapse() {
         expanded = false
+        // 收面板时把输入焦点还给游戏，不然游戏里点哪都不响应
+        marginField?.clearFocus()
+        hideIme()
+        setWindowFocusable(false)
         panel?.visibility = View.GONE
         params?.let { runCatching { wm.updateViewLayout(root, it) } }
     }

@@ -26,15 +26,33 @@ object Badge {
         template = Glyph.loadTemplate(assets, "templates/round-1.png")
     }
 
+    /**
+     * 读取窗口，实际像素：x0,y0,x1,y1。
+     *
+     * 轮次条贴右边画，所以是**右锚**：边距一大它就整体左移，x 各减 [Geom.marginPx]，
+     * 纵向一点不动（实测 dy = 0.00）。不补偿时右边距下这块窗口里根本没字，
+     * 读数会从 1 变成 0（实测，见 .notes/margin-android.md §6.2）。
+     */
+    fun window(w: Int, h: Int): IntArray {
+        val fit = Fit(w, h)
+        val m = Geom.marginPx
+        return intArrayOf(
+            fit.px(X0 - m),
+            fit.py(Y0),
+            min(w, fit.px(X1 - m)),
+            min(h, fit.py(Y1)),
+        )
+    }
+
     /** 1 = 第 1 轮；2 = 不是第 1 轮；0 = 读不出来（画面还没稳）。 */
     fun read(bmp: android.graphics.Bitmap): Int {
         val tpl = template ?: return 1
-        val fit = Fit(bmp.width, bmp.height)
-        val s = fit.s
-        val x0 = fit.px(X0)
-        val x1 = min(bmp.width, fit.px(X1))
-        val y0 = fit.py(Y0)
-        val y1 = min(bmp.height, fit.py(Y1))
+        val s = Fit(bmp.width, bmp.height).s
+        val win = window(bmp.width, bmp.height)
+        val x0 = win[0]
+        val y0 = win[1]
+        val x1 = win[2]
+        val y1 = win[3]
         if (x1 - x0 < 6 || y1 - y0 < 6) {
             lastInfo = "窗口太小 " + x0 + "," + y0 + "-" + x1 + "," + y1
             return 0
