@@ -1,15 +1,15 @@
 package io.github.zuogeren.bqyw
 
 import android.content.Context
-import android.graphics.Color
+import android.content.res.ColorStateList
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.InputFilter
 import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
@@ -30,18 +30,20 @@ import java.util.Locale
 /**
  * 悬浮球：游戏里也能操作的主界面。
  *
- * 收起只有一个小球，拖动移动、点一下展开。展开后一次只显示一页：
- *  - 主面板：当前目标摘要 + 按顺序 + 开始 / 停止 / 状态
+ * 收起只有一个小球，拖动移动、点一下展开。展开后是 250dp 宽的面板，
+ * 顶部常驻四个页签，一屏一页：
+ *  - 主：当前目标 + 当前边距（大数字）· ±10 / 输入框 / 校准 / 试认 · 开始 / 停止 · 状态
  *  - 牌型页：9 个标准牌型 + 自定义，都能多选，达成其中任意一个就停手
  *  - 自定义页：可以写好几组，每组 1~5 张，达成任意一组就停手
  *  - 点数页：改某一组里的某一格（点数 / 花色 / 「不抽」）
- *  - 敌人页：黑白名单，按战力点分组、点一下勾/取消，另有「试认」入口
- *  - 主面板上还有一行「边距」：填游戏内「边距 / 安全区」的数字，配一个数值输入框、
- *    ±10 粗调和一个「校准」按钮（把边距折算、补偿后的坐标、轮次读数写进日志）
+ *  - 敌人页：黑白名单，按战力点分组、点一下勾/取消
  *
  * 全部用面板内展开的选项网格，不弹系统下拉框——悬浮窗里弹窗容易抢焦点。
  * 唯一的例外是边距那个数值输入框：它要打字，所以在聚焦的那一刻才临时把悬浮窗的
  * FLAG_NOT_FOCUSABLE 摘掉（见 setWindowFocusable），失焦立刻装回去。
+ *
+ * 视觉全部走 [Ui]：深色底、绿色强调、等宽数字、1px 细线、直角；
+ * 每个能点的控件都带按下反馈（Ui.pressable 的三态底）。
  */
 class Overlay(private val ctx: Context) {
 
@@ -84,12 +86,27 @@ class Overlay(private val ctx: Context) {
      */
     private var borderMargin = 0
 
-    /** 边距输入框 / 它下面那行折算说明；不在主面板上时是 null。 */
+    /** 边距输入框 / 它上面那个大数字 / 下面那行折算说明；不在主面板上时是 null。 */
     private var marginField: EditText? = null
+    private var marginBig: TextView? = null
     private var marginTip: TextView? = null
 
     /** 程序自己在改输入框内容（±10、失焦规整）时，别当成用户在打字再写一遍。 */
     private var syncingField = false
+
+    /** 页签：文字、下划线，按下时整格变一点绿。 */
+    private val tabTexts = ArrayList<TextView>()
+    private val tabLines = ArrayList<View>()
+
+    /** 面板顶部那颗状态点 + 文字（空闲 / 运行中）。 */
+    private var headDot: View? = null
+    private var headText: TextView? = null
+
+    /** 主面板底部那行「上次干了什么」。 */
+    private var status: TextView? = null
+
+    /** 固定在面板底部的「开始 / 停止」：只在主页面出现，滚动时不会被推走。 */
+    private var footer: LinearLayout? = null
 
     init {
         // 默认口径跟 1.1.0 保持一致：老版本一打开就是「自定义 3 2 5 任 任」，
@@ -114,7 +131,6 @@ class Overlay(private val ctx: Context) {
 
     private var editGroup = 0
     private var editSlot = 0
-    private var status: TextView? = null
 
     private val dp: Float get() = ctx.resources.displayMetrics.density
     private fun px(v: Int): Int = (v * dp).toInt()
@@ -131,14 +147,26 @@ class Overlay(private val ctx: Context) {
             layoutParams = LinearLayout.LayoutParams(px(52), px(52))
         }
 
-        body = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        // 10dp 内边距：面板 250dp 宽，内容可用 230dp，格子的宽度都按这个算
+        body = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(px(10), px(8), px(10), px(10))
+        }
 
         // 自定义能写好几组，面板有可能比屏幕还高；套一层可滚动的，
-        // 免得「开始」被挤到屏幕外面点不着（横屏只有 1260px 高）
+        // 免得「开始」被挤到屏幕外面点不着（横屏只有 1260px 高）。
+        //
+        // 高度上限要扣掉面板里不滚的那几块（页头 + 页签 + 底部开始/停止），
+        // 不然面板会顶出屏幕，底下的「开始」正好被切掉
         scroll = object : ScrollView(ctx) {
             override fun onMeasure(w: Int, h: Int) {
                 val dm = ctx.resources.displayMetrics
-                val cap = (dm.heightPixels - px(96)).coerceAtLeast(px(180))
+                val footH = if (footer?.visibility == View.VISIBLE) {
+                    footer?.measuredHeight?.takeIf { it > 0 } ?: px(70)
+                } else {
+                    0
+                }
+                val cap = (dm.heightPixels - px(96) - px(66) - footH).coerceAtLeast(px(120))
                 super.onMeasure(w, MeasureSpec.makeMeasureSpec(cap, MeasureSpec.AT_MOST))
             }
         }.apply {
@@ -158,16 +186,17 @@ class Overlay(private val ctx: Context) {
 
         panel = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(px(10), px(8), px(10), px(8))
-            background = GradientDrawable().apply {
-                cornerRadius = px(12).toFloat()
-                setColor(Color.parseColor("#F00E1412"))
-                setStroke(px(1), Color.parseColor("#55FFFFFF"))
-            }
+            background = Ui.block(0xF20E1412.toInt(), 0x57FFFFFF, px(1))
             visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(px(250), LinearLayout.LayoutParams.WRAP_CONTENT)
                 .apply { marginStart = px(8) }
+            addView(headRow())
+            addView(Ui.rule(ctx, Ui.LINE2))
+            addView(tabBar())
+            addView(Ui.rule(ctx, Ui.LINE2))
             addView(scroll)
+            footer = footerView()
+            addView(footer)
         }
 
         val container = LinearLayout(ctx).apply {
@@ -207,6 +236,79 @@ class Overlay(private val ctx: Context) {
         body = null
         scroll = null
         status = null
+        footer = null
+        headDot = null
+        headText = null
+        tabTexts.clear()
+        tabLines.clear()
+    }
+
+    // ------------------------------------------------------------ 面板骨架
+
+    /** 顶部一行：左边「抽牌助手」，右边状态点 + 空闲 / 运行中。 */
+    private fun headRow(): LinearLayout = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(px(10), px(8), px(10), px(7))
+        addView(
+            Ui.text(ctx, "抽牌助手", 11f, Ui.DIM2).apply { letterSpacing = 0.08f },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val dot = Ui.dot(ctx, Ui.DIM, 6)
+        headDot = dot
+        addView(dot)
+        val t = Ui.text(ctx, "空闲", 10.5f, Ui.DIM).apply { setPadding(px(5), 0, 0, 0) }
+        headText = t
+        addView(t)
+    }
+
+    /** 四个页签：选中一页是绿字 + 2px 下划线，按下整格泛绿。 */
+    private fun tabBar(): LinearLayout = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        setPadding(px(4), 0, px(4), 0)
+        for ((i, name) in TABS.withIndex()) {
+            val tv = Ui.text(ctx, name, 12f, Ui.DIM).apply { gravity = Gravity.CENTER }
+            val line = View(ctx).apply {
+                setBackgroundColor(Ui.GREEN)
+                visibility = View.INVISIBLE
+            }
+            val box = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                isClickable = true
+                background = Ui.pressable(Ui.CLEAR, 0x1A2FBF71)
+                setOnClickListener { goTab(i) }
+                addView(tv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                addView(line, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(2)))
+            }
+            addView(box, LinearLayout.LayoutParams(0, px(34), 1f))
+            tabTexts.add(tv)
+            tabLines.add(line)
+        }
+    }
+
+    /** 点页签：直接跳到那一页（点数页属于自定义页）。 */
+    private fun goTab(i: Int) {
+        // 点数页属于「自定义」：点这个页签一律回到组列表
+        mode = when (i) {
+            1 -> MODE_HAND
+            2 -> MODE_GROUPS
+            3 -> MODE_ENEMY
+            else -> MODE_MAIN
+        }
+        render()
+    }
+
+    private fun paintTabs() {
+        val active = when (mode) {
+            MODE_HAND -> 1
+            MODE_GROUPS, MODE_SLOT -> 2
+            MODE_ENEMY -> 3
+            else -> 0
+        }
+        tabTexts.forEachIndexed { i, tv -> tv.setTextColor(if (i == active) Ui.GREEN else Ui.DIM) }
+        tabLines.forEachIndexed { i, v ->
+            v.visibility = if (i == active) View.VISIBLE else View.INVISIBLE
+        }
     }
 
     // ------------------------------------------------------------ 渲染
@@ -222,11 +324,12 @@ class Overlay(private val ctx: Context) {
         lastMode = mode
         b.removeAllViews()
         // 旧的 status / 边距控件已经不在面板上了，别再往它们身上写
-        status = null
         marginField = null
+        marginBig = null
         marginTip = null
         // 换页后面板高度会变，把滚动条退回顶部，不然会停在上一次的偏移上
         scroll?.scrollTo(0, 0)
+        paintTabs()
         when (mode) {
             MODE_HAND -> renderHandList(b)
             MODE_GROUPS -> renderGroupList(b)
@@ -234,118 +337,145 @@ class Overlay(private val ctx: Context) {
             MODE_ENEMY -> renderEnemy(b)
             else -> renderMain(b)
         }
+        // 开始 / 停止 只在主页面露出来（别的页面上也用得上，但先把列表留满）
+        footer?.visibility = if (mode == MODE_MAIN) View.VISIBLE else View.GONE
+        // 主界面也要看到同一份目标（开始按钮跑的就是它），见 Selection
+        Selection.publish(handNames(), specs(), ordered)
         fitOnScreen()
         // 高度要等这一帧布局完才定，滚回去得等下一轮
         if (keep > 0) scroll?.post { scroll?.scrollTo(0, keep) }
     }
 
     private fun renderMain(b: LinearLayout) {
-        b.addView(label("目标（勾几个都行，达成任意一个就停）"))
-        b.addView(button(handButtonText(), wide = true) {
-            mode = MODE_HAND
-            render()
-        })
-        if (customOn) {
-            b.addView(button("编辑自定义（" + groups.size + " 组）", wide = true) {
-                mode = MODE_GROUPS
-                render()
-            })
-        }
-        b.addView(button("敌人名单：" + enemyLabel(), wide = true) {
-            mode = MODE_ENEMY
-            render()
-        })
+        b.addView(Ui.label(ctx, "当前目标"))
+        b.addView(
+            Ui.text(ctx, currentTarget()?.toString() ?: "未选择（去「牌型」勾一个）", 13f, Ui.INK).apply {
+                maxLines = 3
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(0, 0, 0, px(2))
+            },
+        )
+
+        b.addView(
+            Ui.rule(ctx),
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(1)).apply {
+                topMargin = px(7)
+                bottomMargin = px(1)
+            },
+        )
 
         // 边距：游戏内那个设置不为 0 时，界面不是整体平移，而是按控件锚边反向挪
         // （贴左 +m、贴右 −m、居中不动），所以得把游戏里的数字抄进来，见 Geom。
-        b.addView(label("边距（游戏内「边距」填几就写几，0 = 不补偿）"))
+        b.addView(Ui.label(ctx, "边距（游戏内设置值，0 = 不补偿）"))
+        b.addView(marginValue())
         b.addView(marginRow())
         marginTip = marginTipView()
         b.addView(marginTip)
 
-        // 摘要和真正开跑用的是同一个 Targets.combine，选了什么、按什么顺序追一眼能看到
-        b.addView(summaryView())
+        b.addView(
+            wideButton("试认 · 看这 5 张是谁") {
+                val svc = CaptureService.instance
+                if (svc == null) BotLog.add("[!] 服务没在跑，先回 App 授权抓屏")
+                else svc.probeEnemiesFromUi()
+            },
+        )
 
-        val orderBox = CheckBox(ctx).apply {
-            text = "按顺序（对每组自定义都生效）"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            isChecked = ordered
-            setOnCheckedChangeListener { _, v ->
-                ordered = v
-                // 勾选这一下还在分发，等它走完再重建面板，免得把正在点的控件拆掉
-                handler.post { render() }
-            }
+        b.addView(
+            CheckBox(ctx).apply {
+                text = "按顺序（对每组自定义都生效）"
+                setTextColor(Ui.DIM2)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                buttonTintList = ColorStateList.valueOf(Ui.GREEN)
+                isChecked = ordered
+                setOnCheckedChangeListener { _, v ->
+                    ordered = v
+                    // 勾选这一下还在分发，等它走完再重建面板，免得把正在点的控件拆掉
+                    handler.post { render() }
+                }
+            },
+        )
+
+        val hint = hintText()
+        if (hint.isNotEmpty()) {
+            b.addView(
+                Ui.text(ctx, hint, 10.5f, Ui.WARN).apply { setPadding(0, 0, 0, px(2)) },
+            )
         }
-        b.addView(orderBox)
 
-        val hint = TextView(ctx).apply {
-            setTextColor(Color.parseColor("#FFFFC857"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setPadding(0, 0, 0, px(4))
-            text = hintText()
+    }
+
+    /**
+     * 面板底部常驻的一条：开始 / 停止 + 最后一次日志。
+     *
+     * 钉在滚动区外面 —— 游戏里横屏只有 360dp 高，主页面一长「开始」就会被推出屏幕。
+     */
+    private fun footerView(): LinearLayout = LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(Ui.rule(ctx, Ui.LINE))
+        val actions = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(px(10), px(8), px(10), px(5))
         }
-        b.addView(hint)
-
-        val actions = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        actions.addView(button("开始", wide = false) { start() }.apply {
-            layoutParams = LinearLayout.LayoutParams(px(58), px(36)).apply { marginEnd = px(6) }
-        })
-        actions.addView(button("停止", wide = false) {
-            CaptureService.instance?.stopBotFromUi()
-        }.apply { layoutParams = LinearLayout.LayoutParams(px(58), px(36)) })
-        b.addView(actions)
-
-        status = TextView(ctx).apply {
-            setTextColor(Color.parseColor("#99FFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setPadding(0, px(6), 0, 0)
+        actions.addView(
+            primaryButton("开始") { start() },
+            LinearLayout.LayoutParams(0, px(38), 1.25f).apply { marginEnd = px(6) },
+        )
+        actions.addView(
+            secondaryButton("停止") { CaptureService.instance?.stopBotFromUi() },
+            LinearLayout.LayoutParams(0, px(38), 1f),
+        )
+        addView(actions)
+        val line = Ui.text(ctx, "", 10f, Ui.DIM, mono = true).apply {
+            setPadding(px(10), 0, px(10), px(8))
             maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = TextUtils.TruncateAt.END
         }
-        b.addView(status)
+        status = line
+        addView(line)
+    }
+
+    /** 主面板上的「当前边距」：大号等宽数字，一眼看到。 */
+    private fun marginValue(): LinearLayout = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.BOTTOM
+        setPadding(0, px(2), 0, px(2))
+        val big = Ui.text(ctx, borderMargin.toString(), 22f, Ui.GREEN, mono = true)
+        marginBig = big
+        addView(big)
+        addView(
+            Ui.text(ctx, if (borderMargin == 0) " 不补偿" else " → 内缩 " + n0(Geom.marginPx) + " px", 10.5f, Ui.DIM)
+                .apply { setPadding(px(6), 0, 0, px(3)) },
+        )
     }
 
     private fun renderHandList(b: LinearLayout) {
-        b.addView(label("牌型 / 自定义（点一下切换，可多选）"))
+        b.addView(Ui.label(ctx, "牌型（点一下切换，可多选）"))
         // 按倍率从高到低排，和判定时的优先级一致，勾起来不容易看错
         val names = HAND_ORDER.map { it.cn } + "自定义"
-        grid(b, names, 2, 92, selected = { idx ->
+        grid(b, names, 2, 106, selected = { idx ->
             if (idx == HAND_ORDER.size) customOn else handSel.contains(HAND_ORDER[idx])
         }) { idx ->
             if (idx == HAND_ORDER.size) toggleCustom() else toggleHand(HAND_ORDER[idx])
             render()
         }
-        // 勾上自定义之后，就在这一页直接给个入口，省得退出去再点一次
-        if (customOn) {
-            b.addView(button("编辑自定义（" + groups.size + " 组）", wide = true) {
-                mode = MODE_GROUPS
-                render()
-            })
-        }
         b.addView(summaryView())
-        b.addView(button("返回", wide = true) {
-            mode = MODE_MAIN
-            render()
-        })
     }
 
     private fun renderGroupList(b: LinearLayout) {
-        b.addView(label("自定义目标（成任意一组就停）"))
+        b.addView(Ui.label(ctx, "自定义目标（成任意一组就停）"))
         groups.forEachIndexed { gi, g ->
             // 每组一行标题 + 5 张牌各占一行，点哪张进去改哪张
             val head = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, px(4), 0, 0)
             }
-            head.addView(TextView(ctx).apply {
-                text = "第 " + (gi + 1) + " 组"
-                setTextColor(Color.parseColor("#AAFFFFFF"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            })
+            head.addView(
+                Ui.text(ctx, "第 " + (gi + 1) + " 组", 11f, Ui.DIM2),
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+            )
             if (groups.size > 1) {
-                head.addView(cell("删除这一组", 78) {
+                head.addView(cell("删除这一组", 84) {
                     groups.removeAt(gi)
                     // 删空了就没法编辑了，留一组空壳（没勾自定义时它也不参与判定）
                     if (groups.isEmpty()) groups.add(Group.fresh())
@@ -354,7 +484,7 @@ class Overlay(private val ctx: Context) {
             }
             b.addView(head)
             for (i in 0 until Target.MAX_DRAWS) {
-                val row = cell("第 " + (i + 1) + " 张    " + g.fmt(i), 222) {
+                val row = cell("第 " + (i + 1) + " 张   " + g.fmt(i), 222) {
                     if (g.editable(i)) {
                         editGroup = gi
                         editSlot = i
@@ -367,15 +497,11 @@ class Overlay(private val ctx: Context) {
                 b.addView(row)
             }
         }
-        b.addView(button("+ 再加一组", wide = true) {
+        b.addView(wideButton("+ 再加一组") {
             groups.add(Group.fresh())
             render()
         })
         b.addView(summaryView())
-        b.addView(button("返回", wide = true) {
-            mode = MODE_MAIN
-            render()
-        })
     }
 
     private fun renderSlotList(b: LinearLayout) {
@@ -387,12 +513,15 @@ class Overlay(private val ctx: Context) {
             renderMain(b)
             return
         }
-        b.addView(label("第 " + (editGroup + 1) + " 组 · 第 " + (editSlot + 1) + " 张"))
+        b.addView(Ui.label(ctx, "第 " + (editGroup + 1) + " 组 · 第 " + (editSlot + 1) + " 张"))
 
         // 这一组 5 张横着摆出来，点哪张改哪张，比一页一页翻快
-        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, px(2), 0, px(2))
+        }
         for (i in 0 until Target.MAX_DRAWS) {
-            val c = cell(g.fmt(i), 40, on = i == editSlot) {
+            val c = cell(g.fmt(i), 42, on = i == editSlot) {
                 if (g.editable(i)) {
                     editSlot = i
                     render()
@@ -416,17 +545,17 @@ class Overlay(private val ctx: Context) {
             val prow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
             prow.addView(
                 cell(p.toString(), 54,
-                    on = !skip && g.point[editSlot] == p && g.suit[editSlot] == 0) { pickSlot(p, 0) }
+                    on = !skip && g.point[editSlot] == p && g.suit[editSlot] == 0) { pickSlot(p, 0) },
             )
             for (s in 1..3) {
                 prow.addView(
                     cell(p.toString() + Target.SUIT_CN[s], 54,
-                        on = !skip && g.point[editSlot] == p && g.suit[editSlot] == s) { pickSlot(p, s) }
+                        on = !skip && g.point[editSlot] == p && g.suit[editSlot] == s) { pickSlot(p, s) },
                 )
             }
             b.addView(prow)
         }
-        b.addView(button("返回", wide = true) {
+        b.addView(wideButton("返回自定义列表") {
             mode = MODE_GROUPS
             render()
         })
@@ -437,9 +566,10 @@ class Overlay(private val ctx: Context) {
      *
      * 每一项是「缩略图 + 名字 + 勾选状态」，点一下切换。名单存 SharedPreferences，
      * 开跑时 CaptureService 读的是同一份 —— 这里改完直接生效，不用重开 App。
+     * 「试认」在主面板上（常驻，不用先进这一页）。
      */
     private fun renderEnemy(b: LinearLayout) {
-        b.addView(label("敌人名单（点一下勾 / 取消；白名单只留勾上的）"))
+        b.addView(Ui.label(ctx, "敌人名单（点一下勾 / 取消）"))
         val chips = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         chips.addView(cell("关", 54, on = enemyMode == Enemies.MODE_OFF) {
             setEnemyMode(Enemies.MODE_OFF)
@@ -454,23 +584,16 @@ class Overlay(private val ctx: Context) {
 
         val all = enemies()
         if (all.isEmpty()) {
-            b.addView(label("没读到模板（assets/enemies/enemies.json 缺了）"))
-            b.addView(button("返回", wide = true) { backToMain() })
+            b.addView(Ui.text(ctx, "没读到模板（assets/enemies/enemies.json 缺了）", 11f, Ui.WARN))
             return
         }
-        b.addView(label("已勾 " + enemySel.size + " 个 / 共 " + all.size + " 个"))
+        b.addView(Ui.text(ctx, "已勾 " + enemySel.size + " 个 / 共 " + all.size + " 个", 10.5f, Ui.GREEN, mono = true))
         for (p in 1..5) {
             val list = all.filter { it.point == p }
             if (list.isEmpty()) continue
-            b.addView(label(p.toString() + " 点（" + list.size + " 个）"))
+            b.addView(Ui.label(ctx, p.toString() + " 点（" + list.size + " 个）"))
             for (e in list) b.addView(enemyCell(e))
         }
-        b.addView(button("试认：看这 5 张是谁", wide = true) {
-            val svc = CaptureService.instance
-            if (svc == null) BotLog.add("[!] 服务没在跑，先回 App 授权抓屏")
-            else svc.probeEnemiesFromUi()
-        })
-        b.addView(button("返回", wide = true) { backToMain() })
     }
 
     /** 一行敌人：缩略图 + 名字 + 勾选状态，整行都能点。 */
@@ -479,12 +602,15 @@ class Overlay(private val ctx: Context) {
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(px(4), px(2), px(4), px(2))
-            background = chip(on)
+            setPadding(px(5), px(2), px(5), px(2))
+            isClickable = true
+            isSelected = on
+            background = Ui.pressable(0x1AFFFFFF, 0x4D2FBF71, 0, 0, 0x332FBF71, Ui.GREEN, px(1))
             layoutParams = LinearLayout.LayoutParams(px(222), px(34)).apply {
                 topMargin = px(3)
                 marginEnd = px(3)
             }
+            setOnClickListener { toggleEnemy(e.name) }
         }
         row.addView(ImageView(ctx).apply {
             setImageBitmap(Enemies.thumb(ctx.assets, e.art))
@@ -493,20 +619,19 @@ class Overlay(private val ctx: Context) {
         })
         row.addView(TextView(ctx).apply {
             text = e.name
-            setTextColor(Color.WHITE)
+            setTextColor(if (on) Ui.INK else Ui.DIM2)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             gravity = Gravity.CENTER_VERTICAL
             maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
         })
         row.addView(TextView(ctx).apply {
             text = if (on) "✓" else "○"
-            setTextColor(if (on) Color.parseColor("#FF7AC8FF") else Color.parseColor("#66FFFFFF"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(if (on) Ui.GREEN else Ui.DIM)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             gravity = Gravity.CENTER
         })
-        row.setOnClickListener { toggleEnemy(e.name) }
         return row
     }
 
@@ -527,20 +652,13 @@ class Overlay(private val ctx: Context) {
 
     private fun saveEnemy() = EnemyStore.save(ctx, EnemyPolicy(enemyMode, enemySel.toList()))
 
-    private fun enemyLabel(): String = EnemyPolicy(enemyMode, enemySel.toList()).label()
-
-    private fun backToMain() {
-        mode = MODE_MAIN
-        render()
-    }
-
     // ------------------------------------------------------------ 边距
 
     /**
      * 边距那一行：输入框 + 粗调 ±10 + 「校准」。
      *
-     * 排版取舍：面板只有 250dp 宽，所以「边距」说明放在上一行当标签，这一行只放
-     * 64dp 的输入框、两个 38dp 的粗调键和一个 52dp 的校准键（合计约 200dp）。
+     * 排版取舍：面板只有 250dp 宽，所以「边距」说明放在上面当标签，这一行只放
+     * 66dp 的输入框、两个 38dp 的粗调键和一个 62dp 的校准键（合计约 214dp）。
      * 输入框要弹系统输入法，而悬浮窗默认是 FLAG_NOT_FOCUSABLE（不抢游戏输入的焦点），
      * 所以只在它聚焦的那一刻临时摘掉那个 flag，见 [setWindowFocusable]；
      * 万一某个机型上输入法弹不出来，±10 也能把值调到任意 10 的倍数，不至于卡死。
@@ -549,19 +667,21 @@ class Overlay(private val ctx: Context) {
         val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, px(2), 0, px(2))
         }
         val field = EditText(ctx).apply {
             setText(borderMargin.toString())
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(Ui.INK)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            typeface = Ui.mono()
             gravity = Gravity.CENTER
-            background = chip(false)
+            background = Ui.block(0x142FBF71, Ui.GREEN, px(1))
             inputType = InputType.TYPE_CLASS_NUMBER
             imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             filters = arrayOf(InputFilter.LengthFilter(3))
             setSingleLine()
             setPadding(px(2), 0, px(2), 0)
-            layoutParams = LinearLayout.LayoutParams(px(64), px(34)).apply { marginEnd = px(4) }
+            layoutParams = LinearLayout.LayoutParams(px(66), px(34)).apply { marginEnd = px(4) }
         }
         // 一边打字一边生效：0~300 内改到哪就是哪，超了按上限算（框里的数字先不动，
         // 免得刚打到「35」就被改成别的），失焦时再把框规整成真正生效的值
@@ -610,7 +730,7 @@ class Overlay(private val ctx: Context) {
         row.addView(cell("+10", 38) { bumpMargin(10) }.apply {
             layoutParams = LinearLayout.LayoutParams(px(38), px(34)).apply { marginEnd = px(4) }
         })
-        row.addView(button("校准", wide = false) {
+        row.addView(secondaryButton("校准") {
             val svc = CaptureService.instance
             if (svc == null) {
                 BotLog.add("[!] 服务没在跑，先回 App 授权抓屏")
@@ -620,16 +740,14 @@ class Overlay(private val ctx: Context) {
                 hideIme()
                 svc.probeMarginFromUi()
             }
-        }.apply { layoutParams = LinearLayout.LayoutParams(px(52), px(34)) })
+        }.apply { layoutParams = LinearLayout.LayoutParams(px(62), px(34)) })
         return row
     }
 
     /** 边距下面那行小字：折算成基准像素，并直接给出补偿后的两个点击坐标。 */
-    private fun marginTipView(): TextView = TextView(ctx).apply {
-        setTextColor(Color.parseColor("#FF9BD1FF"))
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+    private fun marginTipView(): TextView = Ui.text(ctx, marginTipText(), 10f, 0xFF9BD1FF.toInt()).apply {
+        alpha = 0.85f
         setPadding(0, px(1), 0, px(3))
-        text = marginTipText()
     }
 
     /** [typed] 是输入框里的原始数字：超上限时提示「按 300 算」，但框里的字先不改。 */
@@ -652,6 +770,7 @@ class Overlay(private val ctx: Context) {
             borderMargin = v
             Geom.setMargin(v)
             MarginStore.save(ctx, v)
+            marginBig?.text = v.toString()
         }
         marginTip?.text = marginTipText(typed)
     }
@@ -666,6 +785,7 @@ class Overlay(private val ctx: Context) {
         marginField?.setText(v.toString())
         marginField?.setSelection(v.toString().length)
         syncingField = false
+        marginBig?.text = v.toString()
         marginTip?.text = marginTipText()
     }
 
@@ -732,22 +852,18 @@ class Overlay(private val ctx: Context) {
     private fun currentTarget(): TargetBase? =
         runCatching { Targets.combine(handNames(), specs(), ordered) }.getOrNull()
 
-    private fun handButtonText(): String {
-        val n = handSel.size + (if (customOn) groups.size else 0)
-        return if (n == 0) "选择牌型 / 自定义" else "已选 " + n + " 个目标（点击修改）"
-    }
-
     private fun hintText(): String =
-        if (customOn && handSel.isNotEmpty()) "牌型和自定义一起判定，成任意一个就停" else " "
+        if (customOn && handSel.isNotEmpty()) "牌型和自定义一起判定，成任意一个就停" else ""
 
     /** 底部摘要：用和开跑时同一个目标对象，优先级、牌型名都不会跟实际跑的差开。 */
-    private fun summaryView(): TextView = TextView(ctx).apply {
-        setTextColor(Color.parseColor("#99FFFFFF"))
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-        setPadding(0, px(4), 0, px(2))
+    private fun summaryView(): TextView = Ui.text(
+        ctx,
+        "当前：" + (currentTarget()?.toString() ?: "未选择"),
+        10.5f, Ui.DIM2,
+    ).apply {
+        setPadding(0, px(6), 0, px(2))
         maxLines = 3
-        ellipsize = android.text.TextUtils.TruncateAt.END
-        text = "当前：" + (currentTarget()?.toString() ?: "未选择")
+        ellipsize = TextUtils.TruncateAt.END
     }
 
     private fun start() {
@@ -757,7 +873,7 @@ class Overlay(private val ctx: Context) {
             return
         }
         if (handSel.isEmpty() && (!customOn || groups.isEmpty())) {
-            BotLog.add("[!] 还没选目标：点开「选择牌型 / 自定义」勾一个")
+            BotLog.add("[!] 还没选目标：点开「牌型 / 自定义」勾一个")
             return
         }
         svc.startBotFromUi(specs(), handNames(), ordered)
@@ -765,13 +881,14 @@ class Overlay(private val ctx: Context) {
     }
 
     // ------------------------------------------------------------ 控件
+
+    /** 格子：固定宽度，选中是绿底 + 绿描边，按下更亮一档。 */
     private fun cell(text: String, w: Int, on: Boolean = false, onClick: () -> Unit): TextView =
-        TextView(ctx).apply {
-            this.text = text
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        Ui.text(ctx, text, 12.5f, if (on) Ui.INK else Ui.DIM2).apply {
             gravity = Gravity.CENTER
-            background = chip(on)
+            isClickable = true
+            isSelected = on
+            background = Ui.pressable(0x1AFFFFFF, 0x4D2FBF71, 0, 0, 0x332FBF71, Ui.GREEN, px(1))
             layoutParams = LinearLayout.LayoutParams(px(w), px(30)).apply {
                 marginEnd = px(3)
                 topMargin = px(3)
@@ -793,7 +910,8 @@ class Overlay(private val ctx: Context) {
                 row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
                 parent.addView(row)
             }
-            val c = button(text, wide = false, on = selected(i)) { onPick(i) }
+            val c = cell(text, cellW, on = selected(i)) { onPick(i) }
+            c.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             c.layoutParams = LinearLayout.LayoutParams(px(cellW), px(32)).apply {
                 marginEnd = px(4)
                 topMargin = px(3)
@@ -802,46 +920,32 @@ class Overlay(private val ctx: Context) {
         }
     }
 
-    private fun label(text: String): TextView = TextView(ctx).apply {
-        this.text = text
-        setTextColor(Color.parseColor("#AAFFFFFF"))
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-        setPadding(0, px(2), 0, px(3))
-    }
+    /** 通栏按钮（细线），用在「试认 / 再加一组 / 返回」。 */
+    private fun wideButton(text: String, onClick: () -> Unit): TextView =
+        secondaryButton(text, onClick).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, px(34),
+            ).apply { topMargin = px(5) }
+        }
 
-    private fun button(
-        text: String,
-        wide: Boolean,
-        on: Boolean = false,
-        onClick: () -> Unit,
-    ): TextView =
-        TextView(ctx).apply {
-            this.text = text
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+    /** 次要按钮：细线描边、次要字色，按下变亮。 */
+    private fun secondaryButton(text: String, onClick: () -> Unit): TextView =
+        Ui.text(ctx, text, 12.5f, Ui.DIM2).apply {
             gravity = Gravity.CENTER
-            setPadding(px(8), px(4), px(8), px(4))
-            background = chip(on)
-            layoutParams = if (wide) {
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, px(34),
-                ).apply { topMargin = px(2) }
-            } else {
-                LinearLayout.LayoutParams(px(56), px(32))
-            }
+            isClickable = true
+            background = Ui.pressable(0x0DFFFFFF, Ui.PRESS_N, Ui.LINE2, px(1))
             setOnClickListener { onClick() }
         }
 
-    /** 选中态用亮一点的底 + 描边，没选中就还是原来的半透明白。 */
-    private fun chip(on: Boolean): GradientDrawable = GradientDrawable().apply {
-        cornerRadius = px(6).toFloat()
-        if (on) {
-            setColor(Color.parseColor("#6657C8FF"))
-            setStroke(px(1), Color.parseColor("#FF7AC8FF"))
-        } else {
-            setColor(Color.parseColor("#33FFFFFF"))
+    /** 主操作（开始）：填深绿 + 亮绿描边，比别的按钮显眼一档。 */
+    private fun primaryButton(text: String, onClick: () -> Unit): TextView =
+        Ui.text(ctx, text, 14f, 0xFFEAF6EF.toInt()).apply {
+            gravity = Gravity.CENTER
+            letterSpacing = 0.08f
+            isClickable = true
+            background = Ui.pressable(Ui.GREEN_DK, Ui.GREEN, Ui.GREEN, px(1))
+            setOnClickListener { onClick() }
         }
-    }
 
     // ------------------------------------------------------------ 拖动
     private fun attachDrag(ball: View) {
@@ -859,6 +963,8 @@ class Overlay(private val ctx: Context) {
                     startX = p.x
                     startY = p.y
                     moved = false
+                    // 按下就变一点透明度，手指底下有反馈
+                    ball.alpha = 0.72f
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - downX
@@ -868,7 +974,10 @@ class Overlay(private val ctx: Context) {
                     p.y = startY + dy.toInt()
                     runCatching { wm.updateViewLayout(root, p) }
                 }
-                MotionEvent.ACTION_UP -> if (!moved) toggle()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    ball.alpha = 1f
+                    if (e.action == MotionEvent.ACTION_UP && !moved) toggle()
+                }
             }
             true
         }
@@ -931,6 +1040,11 @@ class Overlay(private val ctx: Context) {
         override fun run() {
             val svc = CaptureService.instance
             val running = svc?.isBotRunning() == true
+            headText?.apply {
+                text = if (running) "运行中" else "空闲"
+                setTextColor(if (running) Ui.GREEN else Ui.DIM)
+            }
+            headDot?.let { Ui.paint(it, if (running) Ui.GREEN else Ui.DIM) }
             val last = BotLog.tail(1).firstOrNull() ?: ""
             status?.text = (if (running) "运行中  " else "空闲  ") + last
             handler.postDelayed(this, 700)
@@ -989,6 +1103,9 @@ class Overlay(private val ctx: Context) {
         const val MODE_GROUPS = 3
         const val MODE_ENEMY = 4
 
+        /** 页签顺序：主 / 牌型 / 自定义 / 敌人。 */
+        val TABS = listOf("主", "牌型", "自定义", "敌人")
+
         /** 牌型页的顺序：倍率从高到低，和判定优先级、PC 版的勾选清单一致。 */
         val HAND_ORDER = listOf(
             Hand.STRAIGHT_FLUSH,
@@ -1001,5 +1118,41 @@ class Overlay(private val ctx: Context) {
             Hand.PAIR,
             Hand.HIGH,
         )
+    }
+}
+
+/**
+ * 悬浮球里选的目标：主界面也读这一份，免得两处各记一套。
+ *
+ * 只在当前进程里有效 —— 和 1.2.0 的行为一致：App 重启后目标回到默认那一组
+ * （自定义「3 2 5」），不会莫名其妙换掉上一次的选择。悬浮球每次重画都会
+ * 把最新的选择写进来，主界面的「目标」行和「开始」按钮读的就是它。
+ */
+object Selection {
+
+    /** 悬浮球还没开过时用的默认目标（和 1.1.0 一致：自定义 3 2 5）。 */
+    private val DEFAULT_SPECS = listOf("3 2 5")
+
+    @Volatile private var hands: List<String> = emptyList()
+    @Volatile private var specs: List<String> = DEFAULT_SPECS
+    @Volatile private var orderedFlag = false
+
+    /** 悬浮球重画时把最新的选择写进来。 */
+    fun publish(h: List<String>, s: List<String>, o: Boolean) {
+        hands = h
+        specs = s
+        orderedFlag = o
+    }
+
+    fun hands(): List<String> = hands
+
+    fun specs(): List<String> = specs
+
+    fun ordered(): Boolean = orderedFlag
+
+    /** 一行摘要：和开跑时用的是同一个 Targets.combine，显示和实际不会差开。 */
+    fun label(): String {
+        val t = runCatching { Targets.combine(hands, specs, orderedFlag) }.getOrNull()
+        return t?.toString() ?: ""
     }
 }
