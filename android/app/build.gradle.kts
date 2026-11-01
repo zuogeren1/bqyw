@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.zuogeren.bqyw"
         minSdk = 29
         targetSdk = 36
-        // 版本号跟 PC 版保持一致：1.2.0 -> 122（第三次打包：重排安卓界面，功能不变）
-        versionCode = 122
+        // 版本号跟 PC 版保持一致：1.2.0 -> 123（第四次打包：主界面精简，跑动控制只在悬浮球）
+        versionCode = 123
         versionName = "1.2.0"
     }
 

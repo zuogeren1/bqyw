@@ -2,6 +2,7 @@ package io.github.zuogeren.bqyw
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.drawable.ColorDrawable
@@ -30,8 +31,9 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 主界面：四行授权 → 主操作（开始 / 停止 / 读一帧）→ 日志。
+ * 主界面：三行授权（抓屏 / 点按方式 / 悬浮窗）→ 状态行 → 日志。
  *
+ * 开始 / 停止这些运行控制只在悬浮球里，主界面只负责授权和看日志。
  * 全部是原生 View 手画的，颜色和间距都从 [Ui] 取，和悬浮球面板同一套视觉。
  * 授权行整行可点（按下有底色），状态点即时反映系统里的真实状态；
  * 日志用系统 ListView，几千行也不卡。
@@ -40,18 +42,17 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------ 视图引用
 
-    /** 顶栏右边那颗状态点 + 文字（已提权 / 未提权）。 */
-    private var headDot: View? = null
-    private var headState: TextView? = null
-
-    /** 授权区的「n / 4 就绪」。 */
+    /** 授权区的「n / 3 就绪」。 */
     private var authReady: TextView? = null
 
-    /** 四行授权各自的状态点 + 状态文字。 */
+    /** 三行授权各自的状态点 + 状态文字。 */
     private val authDots = ArrayList<View>()
     private val authStates = ArrayList<TextView>()
 
-    /** 操作区下面的状态行和目标行。 */
+    /** 「点按方式」那行的副标题：实时显示现在用的是无障碍还是 Shizuku。 */
+    private var tapHint: TextView? = null
+
+    /** 授权区下面那两行：运行状态、当前目标与边距。 */
     private var runLine: TextView? = null
     private var targetLine: TextView? = null
 
@@ -92,15 +93,17 @@ class MainActivity : Activity() {
         root.addView(header())
         root.addView(Ui.rule(this, Ui.LINE2))
 
-        // 上半部分（授权 + 操作）可滚：小屏放不下时能翻，不至于把「开始」挤没
+        // 上半部分（授权 + 状态）按内容高度；小屏放不下时能翻
         val top = ScrollView(this).apply {
             isFillViewport = false
             addView(topContent())
         }
-        // 上多下少：授权四行 + 开始按钮要能一屏看全，日志吃剩下的高度
         root.addView(
             top,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 2f),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ),
         )
         root.addView(logHeader())
         root.addView(
@@ -127,48 +130,34 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
         )
         addView(
-            Ui.text(this@MainActivity, "V" + BuildConfig.VERSION_NAME, 10.5f, Ui.DIM, mono = true).apply {
-                setPadding(0, 0, dp(10), 0)
-            },
+            Ui.text(this@MainActivity, "V" + BuildConfig.VERSION_NAME, 10.5f, Ui.DIM, mono = true),
         )
-        val dot = Ui.dot(this@MainActivity, Ui.DIM, 7)
-        headDot = dot
-        addView(dot)
-        val state = Ui.text(this@MainActivity, "未提权", 11.5f, Ui.DIM).apply {
-            setPadding(dp(6), 0, 0, 0)
-        }
-        headState = state
-        addView(state)
     }
 
-    /** 上半部分：授权四行 + 操作区。 */
+    /** 上半部分：三行授权 + 状态行。 */
     private fun topContent(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
 
-        val head = Ui.section(this@MainActivity, "授权 · 4 项", "0 / 4 就绪", Ui.DIM2)
+        val head = Ui.section(this@MainActivity, "授权 · 3 项", "0 / 3 就绪", Ui.DIM2)
         addView(head)
         authReady = head.getChildAt(1) as TextView
-        authRow(this, "①", "抓屏", "点了弹系统的录屏授权框，授权后才能读画面") { requestCapture() }
-        authRow(this, "②", "无障碍", "跳到系统设置，在列表里打开本应用的点按服务") { openAccessibility() }
-        authRow(this, "③", "Shizuku", "先启动 Shizuku；已授权但没连上时点一下去连接") { requestShizuku() }
-        authRow(this, "④", "悬浮窗", "允许「显示在其他应用上层」，悬浮球才出得来") { requestOverlay() }
+        authRow(
+            this, "①", "抓屏", "（点击授权）",
+            "点了弹系统的录屏授权框，授权后才能读画面",
+        ) { requestCapture() }
+        // 无障碍和 Shizuku 都是「点按方式」，合成一行；点开再二选一
+        tapHint = authRow(this, "②", "点按方式", "", tapHintText()) { showTapPicker() }
+        authRow(
+            this, "③", "悬浮窗", "（点击启用）",
+            "允许「显示在其他应用上层」，悬浮球才出得来",
+        ) { requestOverlay() }
 
-        addView(Ui.section(this@MainActivity, "操作 · 运行控制", "主操作更显眼"))
-        addView(actionRow())
-
-        addView(
-            Ui.text(
-                this@MainActivity,
-                "开始前先在悬浮球里勾好目标；抓屏授权之后才会读画面。",
-                10.5f, Ui.DIM,
-            ).apply { setPadding(0, dp(6), 0, dp(2)) },
-        )
         runLine = Ui.text(this@MainActivity, "", 11f, Ui.DIM, mono = true).apply {
-            setPadding(0, dp(6), 0, 0)
+            setPadding(0, dp(10), 0, 0)
         }
         addView(runLine)
         targetLine = Ui.text(this@MainActivity, "", 11f, Ui.DIM2).apply {
-            setPadding(0, dp(3), 0, dp(10))
+            setPadding(0, dp(3), 0, dp(8))
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
         }
@@ -176,10 +165,19 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 一行授权：状态点 + 名字 + 当前状态，第二行一句「点了会发生什么」。
-     * 整行可点，按下有绿色底。
+     * 一行授权：状态点 + 名字（+ 动作后缀）+ 当前状态，第二行一句「点了会发生什么」。
+     *
+     * 整行可点，按下有绿色底。返回第二行那个 TextView，状态会变的那一行
+     * （点按方式）拿它改写副标题。
      */
-    private fun authRow(host: LinearLayout, no: String, name: String, hint: String, onClick: () -> Unit) {
+    private fun authRow(
+        host: LinearLayout,
+        no: String,
+        name: String,
+        suffix: String,
+        hint: String,
+        onClick: () -> Unit,
+    ): TextView {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(9), dp(10), dp(9))
@@ -196,60 +194,33 @@ class MainActivity : Activity() {
         }
         authDots.add(dot)
         line.addView(dot)
-        line.addView(Ui.text(this, no + " " + name, 14f, Ui.INK).apply { typeface = android.graphics.Typeface.DEFAULT_BOLD })
         line.addView(
-            View(this),
-            LinearLayout.LayoutParams(0, 1, 1f),
+            Ui.text(this, no + " " + name, 14f, Ui.INK).apply {
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            },
         )
+        if (suffix.isNotEmpty()) {
+            line.addView(
+                Ui.text(this, suffix, 11f, Ui.DIM).apply {
+                    setPadding(dp(5), dp(1), 0, 0)
+                },
+            )
+        }
+        line.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         val state = Ui.text(this, "—", 10.5f, Ui.DIM, mono = true)
         authStates.add(state)
         line.addView(state)
         row.addView(line)
-        row.addView(
-            Ui.text(this, hint, 10.5f, Ui.DIM).apply {
-                setPadding(dp(15), dp(3), 0, 0)
-            },
-        )
+
+        val sub = Ui.text(this, hint, 10.5f, Ui.DIM).apply {
+            setPadding(dp(15), dp(3), 0, 0)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        row.addView(sub)
         host.addView(row)
         host.addView(Ui.rule(this))
-    }
-
-    /**
-     * 主操作：开始（高、绿、填色）比另外两个显眼一档；三个按钮都等高对齐底部。
-     */
-    private fun actionRow(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.BOTTOM
-        setPadding(0, dp(8), 0, 0)
-
-        val start = Ui.text(this@MainActivity, "开始", 15f, 0xFFEAF6EF.toInt()).apply {
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            letterSpacing = 0.08f
-            gravity = Gravity.CENTER
-            isClickable = true
-            background = Ui.pressable(Ui.GREEN_DK, Ui.GREEN, Ui.GREEN, dp(1))
-            setOnClickListener { startBot() }
-        }
-        addView(start, LinearLayout.LayoutParams(0, dp(54), 1.4f).apply { marginEnd = dp(8) })
-
-        addView(
-            Ui.text(this@MainActivity, "停止", 13f, Ui.DIM2).apply {
-                gravity = Gravity.CENTER
-                isClickable = true
-                background = Ui.pressable(0x0DFFFFFF, Ui.PRESS_N, Ui.LINE2, dp(1))
-                setOnClickListener { stopBot() }
-            },
-            LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginEnd = dp(8) },
-        )
-        addView(
-            Ui.text(this@MainActivity, "读一帧", 13f, Ui.DIM2).apply {
-                gravity = Gravity.CENTER
-                isClickable = true
-                background = Ui.pressable(0x0DFFFFFF, Ui.PRESS_N, Ui.LINE2, dp(1))
-                setOnClickListener { readOneFrame() }
-            },
-            LinearLayout.LayoutParams(0, dp(46), 1f),
-        )
+        return sub
     }
 
     /** 日志标题行：左边标题，右边「导出 / 复制」两个细线小按钮。 */
@@ -331,18 +302,17 @@ class MainActivity : Activity() {
         val shizukuOn = shizuku == "已连接"
 
         setAuth(0, if (capture) "已授权" else "未授权", if (capture) 2 else 0)
-        setAuth(1, if (a11y) "已开启" else "未开启", if (a11y) 2 else 0)
-        setAuth(2, shizuku, if (shizukuOn) 2 else if (shizuku == "已授权") 1 else 0)
-        setAuth(3, if (overlay) "已允许" else "未允许", if (overlay) 2 else 0)
+        // 无障碍 / Shizuku 合成一行：右边写现在生效的那个，副标题再说明一次
+        setAuth(
+            1,
+            if (a11y) "已开启" else shizuku,
+            if (a11y || shizukuOn) 2 else if (shizuku == "已授权") 1 else 0,
+        )
+        setAuth(2, if (overlay) "已允许" else "未允许", if (overlay) 2 else 0)
 
-        authReady?.text = (listOf(capture, a11y, shizukuOn, overlay).count { it }).toString() + " / 4 就绪"
-
-        val ready = Tap.ready()
-        Ui.paint(headDot ?: return@refresh, if (ready) Ui.GREEN else Ui.DIM)
-        headState?.apply {
-            text = if (ready) "已提权" else "未提权"
-            setTextColor(if (ready) Ui.GREEN else Ui.DIM)
-        }
+        authReady?.text =
+            listOf(capture, a11y || shizukuOn, overlay).count { it }.toString() + " / 3 就绪"
+        tapHint?.text = tapHintText()
 
         runLine?.text = statusSpans(capture, a11y, shizukuOn, svc?.isBotRunning() == true)
         targetLine?.text = targetText()
@@ -390,7 +360,7 @@ class MainActivity : Activity() {
         return sb
     }
 
-    /** 目标行：开始按钮要跑的那份目标 + 当前边距，和悬浮球里看到的一致。 */
+    /** 目标行：当前目标 + 当前边距（开始按钮在悬浮球里，跑的就是这份）。 */
     private fun targetText(): String {
         val label = Selection.label()
         val margin = runCatching { MarginStore.load(this) }.getOrDefault(0)
@@ -510,82 +480,91 @@ class MainActivity : Activity() {
         }
     }
 
-    // ------------------------------------------------------------ 运行控制
+    // ------------------------------------------------------------ 点按方式
 
-    /** 开始：用悬浮球里那份目标（同一个进程内共享，见 [Selection]）。 */
-    private fun startBot() {
-        val svc = CaptureService.instance
-        if (svc == null) {
-            toast("服务没在跑，先授权抓屏")
-            BotLog.add("[!] 服务没在跑，先授权抓屏")
-            return
+    /**
+     * 点按方式的副标题：现在实际在用哪一个。
+     *
+     * 两个都开着时按 [Tap.current] 的规矩走 —— 无障碍优先，这里要说清楚，
+     * 免得有人以为「Shizuku 也开着，为什么日志里写的是无障碍」。
+     */
+    private fun tapHintText(): String {
+        val a11y = Tap.a11yReady()
+        val shell = Tap.shellReady()
+        val authorized = Auth.shizuku() == "已授权"
+        return when {
+            a11y && shell -> "当前用 无障碍（两个都开着，无障碍优先）"
+            a11y -> "当前用 无障碍"
+            shell -> "当前用 Shizuku"
+            // 授权过了但用户服务没连上：这时点按其实用不了，得说清楚是卡在哪一步
+            authorized -> "Shizuku 已授权、没连上（点这里连）"
+            else -> "都没开（点这里选）"
         }
-        if (svc.isBotRunning()) {
-            BotLog.add("[!] 已经在跑了")
-            return
-        }
-        val target = runCatching {
-            Targets.combine(Selection.hands(), Selection.specs(), Selection.ordered())
-        }.getOrNull()
-        if (target == null) {
-            toast("还没选目标：进悬浮球勾一个")
-            BotLog.add("[!] 还没选目标：进悬浮球勾一个")
-            return
-        }
-        BotLog.add("开始：" + target)
-        svc.startBotFromUi(Selection.specs(), Selection.hands(), Selection.ordered())
-    }
-
-    private fun stopBot() {
-        val intent = Intent(this, CaptureService::class.java).apply {
-            action = CaptureService.ACTION_STOP_BOT
-        }
-        startForegroundService(intent)
-        BotLog.add("停止：下发停止指令")
     }
 
     /**
-     * 读一帧：拿一张当前画面，把 5 个卡位的点数花色认出来写进日志。
+     * 点按方式二选一：无障碍 / Shizuku。
      *
-     * 和 PC 版的「读一帧」一个用处：不跑机器人也能确认授权有效、画面认得出。
-     * 抓帧和识别都放后台线程，别卡界面。
+     * 选完就走各自原来的流程（无障碍跳系统设置、Shizuku 走授权申请），
+     * 没改任何判定 —— 起作用的还是 [Tap] 那一套（无障碍优先，失败自动换 Shizuku）。
      */
-    private fun readOneFrame() {
-        val svc = CaptureService.instance
-        if (svc == null) {
-            toast("服务没在跑，先授权抓屏")
-            BotLog.add("[!] 服务没在跑，先授权抓屏")
-            return
+    private fun showTapPicker() {
+        val a11y = Tap.a11yReady()
+        val shell = Tap.shellReady()
+        var dialog: AlertDialog? = null
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(2), dp(6), dp(2))
         }
-        BotLog.add("读一帧：取一张当前画面…")
-        Thread {
-            val shot = try {
-                svc.grabBitmap()
-            } catch (e: Throwable) {
-                null
-            }
-            if (shot == null) {
-                BotLog.add("[!] 读一帧：拿不到画面（抓屏授权过期了？）")
-                return@Thread
-            }
-            val msg = try {
-                CardReader.load(assets)
-                val cards = CardReader.readCards(shot)
-                val hand = cards.joinToString(" ") { c ->
-                    if (c.point <= 0) "—"
-                    else c.point.toString() + (if (c.suit in 1..3) Target.SUIT_CN[c.suit] else "")
-                }
-                "读一帧：" + shot.width + "×" + shot.height + "  牌面 " + hand
-            } catch (e: Throwable) {
-                "[!] 读一帧失败：" + e.javaClass.simpleName + " " + (e.message ?: "")
-            } finally {
-                shot.recycle()
-            }
-            handler.post { BotLog.add(msg) }
-        }.apply {
-            isDaemon = true
-            start()
+        box.addView(tapOption("无障碍", Auth.a11y(), a11y) {
+            dialog?.dismiss()
+            openAccessibility()
+        })
+        box.addView(tapOption("Shizuku", Auth.shizuku(), shell && !a11y) {
+            dialog?.dismiss()
+            requestShizuku()
+        })
+
+        dialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("点按方式")
+            .setView(box)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.show()
+        // 系统弹窗默认是灰底，换成和面板同一套深色
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Ui.PANEL))
+    }
+
+    /** 弹窗里的一行：名字 + 当前状态，正在用的那个高亮 + 标「使用中」。 */
+    private fun tapOption(name: String, state: String, active: Boolean, onClick: () -> Unit): LinearLayout {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(11), dp(10), dp(11))
+            isClickable = true
+            isSelected = active
+            background = Ui.pressable(Ui.CLEAR, Ui.PRESS, selFill = 0x332FBF71)
+            setOnClickListener { onClick() }
         }
+        row.addView(
+            Ui.dot(this, if (active) Ui.GREEN else Ui.DIM, 7).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply { marginEnd = dp(9) }
+            },
+        )
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(
+            Ui.text(this, name, 14f, Ui.INK).apply {
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            },
+        )
+        col.addView(Ui.text(this, state, 10.5f, Ui.DIM))
+        row.addView(
+            col,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        if (active) row.addView(Ui.text(this, "使用中", 10.5f, Ui.GREEN))
+        return row
     }
 
     // ------------------------------------------------------------ 日志导出 / 复制
