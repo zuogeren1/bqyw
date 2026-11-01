@@ -16,7 +16,7 @@ import kotlin.math.roundToInt
  *
  * 20:9 上三者恒等（w = 2800·s、ox = 0），所以 1.2.0 之前完全看不出来；一换比例就分叉：
  * 11:5 上左右锚各差 12 px —— 点击还落在按钮里，但 [Layout] 自检按居中偏移折回，
- * 边距凭空多算 14 px 直接停手（详见 .notes/knowledge/margin-android.md §12）。
+ * 边距凭空多算 14 px 直接停手。
  *
  * 其余两条：
  *
@@ -27,7 +27,6 @@ import kotlin.math.roundToInt
  * 改之前用的是 min(w/2800, h/1260) + 上下留黑边，在 20:9 上两者完全等价，
  * 一换比例就整体偏：11:5 上老写法 s=0.8486（差 1%）、oy=5.4（凭空多出黑边），
  * 到屏幕右侧累积 11.6 px —— 轮次徽章窗口只有 38 px 宽，直接读错。
- * 详见 .notes/knowledge/margin-android.md §11。
  */
 class Fit(val w: Int, val h: Int) {
 

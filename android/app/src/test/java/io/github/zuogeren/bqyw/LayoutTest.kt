@@ -14,12 +14,12 @@ import java.io.File
  * 两条路：
  *  - **合成图**（必跑）：按实拍图量到的坐标画一张 2376×1080 的图（卡牌白带 + 青色抽牌按钮），
  *    要求反推出来的 (s, ox, m) 和实拍图一致。这钉的是"算法"，不依赖任何图片文件。
- *  - **真图**（本地有 refs/ 才跑，没有就 skip）：直接读 11:5 那张 jpg 走一遍。
- *    refs/ 不进仓库，所以用 [Assume] 跳过，别让 CI 挂。
+ *  - **真图**（设了 BQYW_IMAGE_DIR 才跑，否则 skip）：直接读 11:5 那张 jpg 走一遍。
+ *    图不在仓库里，所以用 [Assume] 跳过，别让 CI 挂。
  */
 class LayoutTest {
 
-    /** 2376×1080 实拍图上量到的坐标（.notes/knowledge/margin-android.md §12.1 / §12.6）。 */
+    /** 2376×1080 实拍图上量到的坐标。 */
     private class Fake(
         val w: Int = 2376,
         val h: Int = 1080,
@@ -132,21 +132,18 @@ class LayoutTest {
     }
 
     /**
-     * 真图回归：refs/ 里有 11:5 那张就跑，没有就 skip（refs/ 不进仓库）。
+     * 真图回归：环境变量 BQYW_IMAGE_DIR 指到图片目录就跑，否则 skip。
      *
      * 这里用反射读 jpg：单测编译时用的是 android.jar，上面没有 `javax.imageio`，
      * 直接 import 编不过；反射在本机 JVM 上跑得通，类不在就当成"没素材"跳过。
-     * 纯 Kotlin 的端到端复核还是 `.notes/margin_measure.py --c`（Python 那套）。
+     * 纯 Kotlin 的端到端复核还是 Python 那套脚本。
      */
     @Test
     fun realElevenByFiveScreenshot() {
         val name = "安卓端-屏幕比例11比5-自定义边距-未知-不为零.jpg"
-        val f = listOf(
-            File("../../refs/$name"),
-            File("../refs/$name"),
-            File("refs/$name"),
-        ).firstOrNull { it.isFile }
-        Assume.assumeTrue("没有 refs/$name 就跳过（参考图不进仓库）", f != null)
+        val dir = System.getenv("BQYW_IMAGE_DIR").orEmpty()
+        val f = if (dir.isEmpty()) null else File(dir, name).takeIf { it.isFile }
+        Assume.assumeTrue("没设 BQYW_IMAGE_DIR（或目录里没这张图）就跳过", f != null)
 
         val img = readImage(f!!)
         Assume.assumeTrue("这台机器上没有 javax.imageio，跳过", img != null)

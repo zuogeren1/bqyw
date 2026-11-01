@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""从 refs/ 的游戏截图里切出模板。
+"""从实机截图里切出模板。
+
+截图目录用 --images 指定（不进仓库）：
+    python tools/extract_templates.py --images <截图目录>
 
 想补模板：往 SAMPLES 里加一行 (图片文件名, 槽位, 点数, 花色) 再跑一次即可。
 花色用中文「筒/索/萬」写，落盘时会转成 tong/suo/wan。
 """
+import argparse
 import os
 import sys
 import tempfile
@@ -18,7 +22,7 @@ from bqyw import geometry as G  # noqa: E402
 from bqyw.rules import SUIT_UNKNOWN  # noqa: E402
 from bqyw.vision import SUIT_ASCII, locate_parts  # noqa: E402
 
-REF = os.path.join(ROOT, "refs")
+REF = ""  # 由 --images 指定
 OUT = os.path.join(ROOT, "templates")
 os.makedirs(OUT, exist_ok=True)
 
@@ -46,6 +50,10 @@ def read_gray(name):
 
 
 def main():
+    global REF
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--images", required=True, help="放实机截图的目录（不进仓库）")
+    REF = ap.parse_args().images
     gallery = []
     for fn, slot, point, suit in SAMPLES:
         gray = read_gray(fn)
@@ -92,9 +100,9 @@ def main():
         rows = [np.hstack([r, np.full((r.shape[0], wmax - r.shape[1], 3), 30, np.uint8)])
                 for r in rows]
         # 对照图是给人看的中间产物：放临时目录，不往仓库里塞，也不依赖任何本地目录
-        gallery = os.path.join(tempfile.gettempdir(), "bqyw-tpl-gallery")
-        os.makedirs(gallery, exist_ok=True)
-        out_path = os.path.join(gallery, "tpl_gallery.png")
+        gal_dir = os.path.join(tempfile.gettempdir(), "bqyw-tpl-gallery")
+        os.makedirs(gal_dir, exist_ok=True)
+        out_path = os.path.join(gal_dir, "tpl_gallery.png")
         cv2.imencode(".png", np.vstack(rows))[1].tofile(out_path)
         print("模板对照图 →", out_path)
     print("模板已写入", OUT)

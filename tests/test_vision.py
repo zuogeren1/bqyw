@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """识别自检：python tests/test_vision.py
 
-依赖 refs/ 里的实机截图（不进仓库）。没有截图时只跑纯几何的检查。
+实机截图放在环境变量 BQYW_IMAGE_DIR 指的目录（不进仓库）。没设就只跑纯几何的检查。
 标定数据都是从这些截图实测来的，改动 geometry / vision 之后跑一遍最快的回归。
 """
 import os
@@ -27,8 +27,13 @@ def check(name, got, want):
     OK.append(name)
 
 
+IMAGE_DIR = os.environ.get("BQYW_IMAGE_DIR", "")
+
+
 def load(name):
-    path = os.path.join(ROOT, "refs", name)
+    if not IMAGE_DIR:
+        return None
+    path = os.path.join(IMAGE_DIR, name)
     if not os.path.exists(path):
         return None
     return cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
@@ -126,4 +131,4 @@ for name, want_cards, want_round, _hl in CASES:
 
 G.reset_resolution()
 
-print(f"全部 {len(OK)} 项通过" + (f"（{ran} 张截图）" if ran else "（没找到 refs/，跳过截图回归）"))
+print(f"全部 {len(OK)} 项通过" + (f"（{ran} 张截图）" if ran else "（没设 BQYW_IMAGE_DIR，跳过截图回归）"))

@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [Fit] 的 JVM 单测：按高度铺满 + **三条锚边**（.notes/knowledge/margin-android.md §11 / §12）。
+ * [Fit] 的 JVM 单测：按高度铺满 + **三条锚边**。
  *
  * 四条底线：
  *  1. **2800×1260 上必须一个数都不变** —— 老用户全在这块屏上，改完得逐值相等；
@@ -31,7 +31,7 @@ class FitTest {
         assertEquals("ox", 0f, fit.ox, 1e-4f)
         assertEquals("oy", 0f, fit.oy, 1e-4f)
 
-        // 改之前的实测值（refs/安卓端-自定义边距-0.jpg），一个都不许动；三条锚边也要恒等
+        // 改之前的实测值（实机截图），一个都不许动；三条锚边也要恒等
         val pinned = intArrayOf(
             0, 60, 356, 392, 427, 1015, 1400, 2405, 2520, 2624, 2662, 2800,
         )
