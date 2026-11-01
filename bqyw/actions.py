@@ -75,12 +75,34 @@ def click_box(box, delay: float = 0.01, origin: tuple[int, int] = (0, 0)) -> Non
 
 
 def activate_window(hwnd) -> None:
-    """把游戏窗口提到前台，避免点到别的窗口上。"""
+    """把游戏窗口提到前台，避免点到别的窗口上。
+
+    只调 SetForegroundWindow 经常白调：当前台窗口属于别的进程时，Windows 会
+    **直接拒绝**（日志里就是"没能把游戏窗口提到前台"）。标准解法是把本线程和
+    前台窗口的线程输入队列临时挂在一起（AttachThreadInput），借它的权限把窗口
+    拎到前面 —— 实测在"用户正盯着别的窗口"时也只有这一招管用。
+    """
     if not hwnd:
         return
+    u = ctypes.windll.user32
     try:
-        ctypes.windll.user32.ShowWindow(hwnd, 9)      # SW_RESTORE
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        u.ShowWindow(hwnd, 9)                          # SW_RESTORE
+        fg = u.GetForegroundWindow()
+        if fg == hwnd:
+            time.sleep(0.2)
+            return
+        t_fg = u.GetWindowThreadProcessId(fg, None) if fg else 0
+        t_me = ctypes.windll.kernel32.GetCurrentThreadId()
+        attached = False
+        if t_fg and t_fg != t_me:
+            attached = bool(u.AttachThreadInput(t_me, t_fg, True))
+        try:
+            u.BringWindowToTop(hwnd)
+            u.SetForegroundWindow(hwnd)
+            u.SetFocus(hwnd)
+        finally:
+            if attached:
+                u.AttachThreadInput(t_me, t_fg, False)
         time.sleep(0.2)
     except Exception:
         pass
