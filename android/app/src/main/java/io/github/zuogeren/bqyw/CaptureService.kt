@@ -199,11 +199,20 @@ class CaptureService : Service() {
             return
         }
         // 单个目标还是单个 Target，多选才包成 MultiTarget，组装规则和悬浮球的摘要一致
-        val target = try {
+        val picked = try {
             Targets.combine(handNames, specs, ordered)
         } catch (e: Throwable) {
             BotLog.add("[!] 目标写法不对：" + (e.message ?: ""))
             return
+        }
+        // 旧数据里可能只勾了「散牌」：目标入口已经把它剔掉了（Targets.normalizeHands），
+        // 剔完一个目标都不剩就退回四条（和 PC 版默认一致），
+        // 不然这一轮会被当成「没选目标」直接不开局。
+        val target = picked ?: if (handNames.isNotEmpty() || specs.isNotEmpty()) {
+            BotLog.add("[!] 目标里的「散牌」不再支持，已改用「" + Hand.QUADS.cn + "」")
+            Targets.combine(listOf(Targets.FALLBACK_HAND), emptyList(), ordered)
+        } else {
+            null
         }
         if (target == null) {
             BotLog.add("[!] 还没选目标：点悬浮球 → 牌型，勾一个再开始")

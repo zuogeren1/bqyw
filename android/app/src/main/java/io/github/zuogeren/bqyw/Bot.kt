@@ -20,8 +20,12 @@ class Bot(
     private val log: (String) -> Unit,
 ) {
 
-    /** 已经读到手牌的有几轮。 */
-    private var attempts = 0
+    /**
+     * 轮数：**一次发牌 = 一轮**，跟这一轮最后抽了几张无关。
+     *
+     * 见 [Rounds]。到上限（[maxAttempts]）就不再开新的，那里同时决定停手时机。
+     */
+    private val rounds = Rounds(maxAttempts)
 
     /** 累计翻出来的牌数、点了多少下「抽牌」，结束摘要用。 */
     private var cardsDrawn = 0
@@ -213,6 +217,18 @@ class Bot(
                 sleep(120)
                 continue
             }
+            // ---- 轮数：一次发牌 = 一轮（PC 口径）。
+            // 记账就打在"这一轮开始"的时候，所以 [第 N 轮] 也在这里写；
+            // 2 张就提前放弃的局照样算一轮，不再出现「5 张 / 0 轮」。
+            val roundNo = rounds.tick(filled)
+            if (roundNo > 0) {
+                log("[第 " + roundNo + " 轮]")
+                if (roundNo % 10 == 0) logPace()
+            } else if (filled > 0 && !rounds.armed) {
+                // 有牌却开不了新一轮 = 到重开上限了（PC 也是开下一轮之前停）
+                log("达到重开上限 " + maxAttempts + "，停止")
+                return "max"
+            }
             // 目标判定只认「已经抽到的牌」。
             // CardReader 永远给 5 格，没翻开的是 Card(0, 0)；空位混进判定里会被当成真的
             // 0 点牌：3 个空位能让 Hands 判出三条、4 张同花因为空位花色不同永远判不出来、
@@ -255,6 +271,11 @@ class Bot(
             }
             if (filled < stop) {
                 if (filled == 0) {
+                    // 上一轮已经弃完、牌桌清空：到上限就在这里停，省掉一次「抽牌」
+                    if (rounds.exhausted) {
+                        log("达到重开上限 " + maxAttempts + "，停止")
+                        return "max"
+                    }
                     idle++
                     lastFilled = 0
                     noGain = 0
@@ -334,24 +355,17 @@ class Bot(
             lastHandAt = now
             // 抽满这一轮都没撞名单，连着撞的计数清零
             enemyStreak = 0
-            attempts++
             // 短自定义目标命中时手上还不到 5 张，牌型也只能按实际抽到的牌算
             val hand = Hands.best(drawn)
-            log("[第 " + attempts + " 轮]")
             log(
                 "   [" + drawn.size + "张] " + cardsText(drawn) +
                     " 牌型=" + hand.cn + " 战力点=" + pts.sum(),
             )
-            if (attempts % 10 == 0) logPace()
             if (intact && target.matches(drawn, left)) {
                 log("命中 " + target + "：" + cardsText(drawn) +
                     "  战力点 " + pts.sum() + "  预估奖励点 " + Hands.score(drawn))
                 engine.beep()
                 return "hit"
-            }
-            if (maxAttempts > 0 && attempts >= maxAttempts) {
-                log("达到重开上限 " + maxAttempts + "，停止")
-                return "max"
             }
             if (!roundStillOne()) {
                 // 第二轮按放弃等于退出整场演算，读不准就再等一圈
@@ -366,26 +380,13 @@ class Bot(
     }
 
     /**
-     * 结束摘要，写法和 PC 版一致：
-     * 用时 602s，105 轮，平均 5.7s/轮，587 张牌，1.02s/张（点击 1.22 次/张），点击节拍 1.45 s。
-     * 一张牌都没翻出来时中间几项整项不写 —— 算不出来的不编。
+     * 结束摘要，格式见 [summaryLine]。
+     *
+     * 「轮」用的是发牌数（[rounds]），2 张就放弃的局也算 —— 见 [Rounds]。
      */
     fun summary(): String {
         val secs = (System.currentTimeMillis() - startedAt) / 1000.0
-        val sb = StringBuilder("用时 ").append(Math.round(secs)).append("s，")
-        sb.append(attempts).append(" 轮，平均 ")
-            .append(f(secs / attempts.coerceAtLeast(1), 1)).append("s/轮")
-        if (cardsDrawn > 0) {
-            sb.append("，").append(cardsDrawn).append(" 张牌，")
-                .append(f(secs / cardsDrawn, 2)).append("s/张")
-            sb.append("（点击 ").append(f(drawTaps.toDouble() / cardsDrawn, 2))
-                .append(" 次/张）")
-        }
-        sb.append("，点击节拍 ").append(f(clickDelay, 2)).append(" s")
-        if (enemyDrops > 0) {
-            sb.append("，因名单弃 ").append(enemyDrops).append(" 轮")
-        }
-        return sb.toString()
+        return summaryLine(secs, rounds.started, cardsDrawn, drawTaps, clickDelay, enemyDrops)
     }
 
     // ------------------------------------------------------------ 敌人名单
@@ -517,17 +518,13 @@ class Bot(
         }
     }
 
-    /** 每 10 轮打一行节奏账：等节拍 / 点击 / 读牌 / 放弃各花了多少。 */
+    /** 每 10 轮打一行节奏账（格式见 [paceLine]），「轮」同样按发牌数算。 */
     private fun logPace() {
-        val n = cardsDrawn.coerceAtLeast(1)
-        val r = forfeitCount.coerceAtLeast(1)
         log(
-            "[节奏] " + cardsDrawn + " 张 / " + attempts + " 轮：" +
-                "等节拍 " + f(waitMs / 1000.0 / n, 2) + "s/张，" +
-                "点击 " + f(tapMs / 1000.0 / n, 2) + "，" +
-                "读牌 " + f(readMs / 1000.0 / n, 2) + "，" +
-                "放弃 " + f(forfeitMs / 1000.0 / r, 2) + "s/轮，" +
-                "点击节拍 " + f(clickDelay, 2) + "s",
+            paceLine(
+                cardsDrawn, rounds.started, waitMs, tapMs, readMs, forfeitMs,
+                forfeitCount, clickDelay,
+            ),
         )
     }
 
@@ -709,9 +706,8 @@ class Bot(
     /** 从 [fromNanos] 到现在，毫秒。 */
     private fun msSince(fromNanos: Long): Long = (System.nanoTime() - fromNanos) / 1_000_000
 
-    /** 固定按 US 格式化，免得某些机型把小数点写成逗号。 */
-    private fun f(x: Double, digits: Int): String =
-        String.format(Locale.US, "%." + digits + "f", x)
+    /** 固定按 US 格式化，免得某些机型把小数点写成逗号（等价 [num]）。 */
+    private fun f(x: Double, digits: Int): String = num(x, digits)
 
     private companion object {
         /** 两次点击的间隔（秒）：冷却实测 ≈1.38s，留一点余量。 */
@@ -735,4 +731,70 @@ class Bot(
         /** 多长一段连续黄才算弹窗（屏幕像素）：确认键本身 433 px 宽，20 px 留足余量。 */
         const val MODAL_RUN = 20
     }
+}
+
+// ---------------------------------------------------------------- 日志格式
+//
+// 下面几个都是纯函数：不碰 Bot 的状态、不碰 Android API，JVM 单测能直接验算格式
+// （见 RoundsTest）。Bot.summary() / Bot.logPace() 只是把当前数字丢进来。
+
+/** 固定按 US 格式化，免得某些机型把小数点写成逗号。 */
+internal fun num(x: Double, digits: Int): String = String.format(Locale.US, "%." + digits + "f", x)
+
+/**
+ * 结束摘要，写法和 PC 版一致：
+ * `用时 602s，105 轮，平均 5.7s/轮，587 张牌，1.02s/张（点击 1.22 次/张），点击节拍 1.45 s`。
+ *
+ * 一张牌都没翻出来时中间几项整项不写；**一轮都没开时连「平均 s/轮」也不写** ——
+ * 分母是 0 的那行是假数（1.2.0 真机日志里出现过「0 轮，平均 10.9s/轮」）。
+ */
+internal fun summaryLine(
+    secs: Double,
+    rounds: Int,
+    cardsDrawn: Int,
+    taps: Int,
+    clickDelay: Double,
+    enemyDrops: Int,
+): String {
+    val sb = StringBuilder("用时 ").append(Math.round(secs)).append("s，")
+    sb.append(rounds).append(" 轮")
+    if (rounds > 0) {
+        sb.append("，平均 ").append(num(secs / rounds, 1)).append("s/轮")
+    }
+    if (cardsDrawn > 0) {
+        sb.append("，").append(cardsDrawn).append(" 张牌，")
+            .append(num(secs / cardsDrawn, 2)).append("s/张")
+        sb.append("（点击 ").append(num(taps.toDouble() / cardsDrawn, 2)).append(" 次/张）")
+    }
+    sb.append("，点击节拍 ").append(num(clickDelay, 2)).append(" s")
+    if (enemyDrops > 0) {
+        sb.append("，因名单弃 ").append(enemyDrops).append(" 轮")
+    }
+    return sb.toString()
+}
+
+/**
+ * `[节奏]` 行：几张牌 / 几轮 + 各段耗时摊到每张牌、放弃摊到每轮。
+ *
+ * 「轮」用的是发牌数（[Rounds]），2 张就提前放弃的局也算一轮。
+ * 分母兜到 1：没翻出牌 / 没放弃过时那些项本来就是 0，不能编数。
+ */
+internal fun paceLine(
+    cardsDrawn: Int,
+    rounds: Int,
+    waitMs: Long,
+    tapMs: Long,
+    readMs: Long,
+    forfeitMs: Long,
+    forfeits: Int,
+    clickDelay: Double,
+): String {
+    val n = cardsDrawn.coerceAtLeast(1)
+    val r = forfeits.coerceAtLeast(1)
+    return "[节奏] " + cardsDrawn + " 张 / " + rounds + " 轮：" +
+        "等节拍 " + num(waitMs / 1000.0 / n, 2) + "s/张，" +
+        "点击 " + num(tapMs / 1000.0 / n, 2) + "，" +
+        "读牌 " + num(readMs / 1000.0 / n, 2) + "，" +
+        "放弃 " + num(forfeitMs / 1000.0 / r, 2) + "s/轮，" +
+        "点击节拍 " + num(clickDelay, 2) + "s"
 }

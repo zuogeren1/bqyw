@@ -192,6 +192,19 @@ class MultiTarget(pool: List<TargetBase>) : TargetBase {
 
 object Targets {
 
+    /**
+     * 「散牌」不再是可选目标，选中它时的兜底（和 PC 版的默认目标一致：四条）。
+     *
+     * 任何一手牌都至少是散牌，勾它等于「第一张就停」；提前剪枝还会打出
+     * 「散牌 已不可能，提前放弃」这种自相矛盾的日志。所以牌型页不再提供它，
+     * 旧数据里带进来的一律剔除，剔完什么都不剩就落到这个兜底上。
+     */
+    const val FALLBACK_HAND = "QUADS"
+
+    /** 「散牌」不允许当目标 —— [Hand.HIGH] 本身还要用（判断这手牌是什么牌型）。 */
+    fun normalizeHands(names: List<String>): List<String> =
+        names.map { it.trim() }.filter { it.isNotEmpty() && it != Hand.HIGH.name }
+
     /** 解析 "3筒 2 5 任 任" 这种写法：不写花色就是不限。 */
     fun parse(spec: String, ordered: Boolean = false): Target {
         val raw = spec.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
@@ -207,7 +220,8 @@ object Targets {
      */
     fun combine(handNames: List<String>, specs: List<String>, ordered: Boolean): TargetBase? {
         val pool = ArrayList<TargetBase>()
-        for (n in handNames) {
+        // 旧数据里可能还留着「散牌」，这里统一剔掉（见 [normalizeHands]）
+        for (n in normalizeHands(handNames)) {
             val h = Hand.values().firstOrNull { it.name == n }
                 ?: throw IllegalArgumentException("不认识的牌型：" + n)
             pool += Target(emptyList(), h)

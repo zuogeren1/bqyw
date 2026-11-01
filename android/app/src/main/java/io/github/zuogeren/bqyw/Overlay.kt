@@ -33,7 +33,7 @@ import java.util.Locale
  * 收起只有一个小球，拖动移动、点一下展开。展开后是 250dp 宽的面板，
  * 顶部常驻四个页签，一屏一页：
  *  - 主：当前目标 + 当前边距（大数字）· ±10 / 输入框 / 校准 / 试认 · 开始 / 停止 · 状态
- *  - 牌型页：9 个标准牌型 + 自定义，都能多选，达成其中任意一个就停手
+ *  - 牌型页：8 个标准牌型 + 自定义，都能多选，达成其中任意一个就停手（不含「散牌」）
  *  - 自定义页：可以写好几组，每组 1~5 张，达成任意一组就停手
  *  - 点数页：改某一组里的某一格（点数 / 花色 / 「不抽」）
  *  - 敌人页：黑白名单，按战力点分组、点一下勾/取消
@@ -845,7 +845,13 @@ class Overlay(private val ctx: Context) {
         if (customOn && groups.isEmpty()) groups.add(Group.legacy())
     }
 
-    private fun handNames(): List<String> = handSel.map { it.name }
+    /**
+     * 勾上的标准牌型名。
+     *
+     * 走一次 [Targets.normalizeHands]：牌型页已经不给「散牌」了，这里防的是旧数据 /
+     * 外部塞进来的名字（剔除后为空时由 [start] 和 CaptureService 兜底成四条）。
+     */
+    private fun handNames(): List<String> = Targets.normalizeHands(handSel.map { it.name })
 
     private fun specs(): List<String> = if (customOn) groups.map { it.spec() } else emptyList()
 
@@ -1106,7 +1112,13 @@ class Overlay(private val ctx: Context) {
         /** 页签顺序：主 / 牌型 / 自定义 / 敌人。 */
         val TABS = listOf("主", "牌型", "自定义", "敌人")
 
-        /** 牌型页的顺序：倍率从高到低，和判定优先级、PC 版的勾选清单一致。 */
+        /**
+         * 牌型页的顺序：倍率从高到低，和判定优先级、PC 版的勾选清单一致。
+         *
+         * **不含「散牌」**：任何一手牌都至少是散牌，勾它等于第一张就停，
+         * 提前剪枝还会打出「散牌 已不可能，提前放弃」这种自相矛盾的日志。
+         * [Hand.HIGH] 本身保留 —— 判断「这手牌是什么牌型」时仍然要用它。
+         */
         val HAND_ORDER = listOf(
             Hand.STRAIGHT_FLUSH,
             Hand.QUADS,
@@ -1116,7 +1128,6 @@ class Overlay(private val ctx: Context) {
             Hand.TRIPS,
             Hand.TWO_PAIR,
             Hand.PAIR,
-            Hand.HIGH,
         )
     }
 }

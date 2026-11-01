@@ -11,8 +11,9 @@ android {
         applicationId = "io.github.zuogeren.bqyw"
         minSdk = 29
         targetSdk = 36
-        // 版本号跟 PC 版保持一致：1.2.0 -> 123（第四次打包：主界面精简，跑动控制只在悬浮球）
-        versionCode = 123
+        // 版本号跟 PC 版保持一致：1.2.0 -> 120（敌人黑白名单这一版）
+        // 124：轮数改按发牌记账（提前放弃的局也计一轮）+ 移除「散牌」目标
+        versionCode = 124
         versionName = "1.2.0"
     }
 
