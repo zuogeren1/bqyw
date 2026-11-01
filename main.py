@@ -58,6 +58,14 @@ def cmd_stats(_args):
     if miss["digit"] or miss["suit"]:
         print(f"  [!] 模板缺口：数字 {miss['digit']}，花色 {miss['suit']}")
     print()
+    from bqyw.enemies import Book
+    book = Book()
+    if len(book):
+        per = "  ".join(f"{p} 点 {len(book.by_point(p))} 种" for p in range(1, 6))
+        print(f"敌人模板 {len(book)} 个（{per}），阈值 {book.threshold:.2f}")
+    else:
+        print("[!] 敌人模板没装上（templates/enemies.json 缺了）")
+    print()
     print(f"{'牌型':<6}{'达成概率':>10}{'期望重开':>12}")
     for h in sorted(Hand, key=lambda x: x.value):
         p = completion_probability((), h, 5, full_deck())
@@ -86,10 +94,36 @@ def cmd_inspect(args):
         print(f"  生效牌型：{HAND_NAME_CN[best]}  预估奖励点 {score(cards, lucky, args.s1)}")
         if args.s1:
             print(f"  两轮合计：{battle_total(args.s1, cards, lucky)}（S1 = {args.s1}）")
+        from bqyw.enemies import Book, art_box
+        book = Book()
+        if len(book):
+            for i, c in enumerate(cards):
+                b = art_box(i)
+                hit, got = book.best(img[b.y1:b.y2, b.x1:b.x2], c.point)
+                if hit is None:
+                    print(f"  第 {i + 1} 张：认不出")
+                else:
+                    flag = "" if got >= book.threshold else "（不到阈值，不算认出）"
+                    print(f"  第 {i + 1} 张：{hit.name} {got:.3f} {flag}")
         left = 5 - len(cards)
         print(f"  还能抽 {left} 张；已不可能达成的牌型：")
         dead = [HAND_NAME_CN[h] for h in Hand if completion_probability(cards, h, left) == 0]
         print(f"    {dead if dead else '无'}")
+
+
+def enemy_policy(args):
+    """敌人名单：命令行 --ban / --only 优先，没给就读 config.json。"""
+    from bqyw import enemies as E
+
+    if getattr(args, "ban", None) and getattr(args, "only", None):
+        raise SystemExit("--ban 和 --only 只能给一个（黑名单 / 白名单）")
+    names = E.parse_names(getattr(args, "ban", None))
+    if names:
+        return E.Policy(E.MODE_BAN, names)
+    names = E.parse_names(getattr(args, "only", None))
+    if names:
+        return E.Policy(E.MODE_ONLY, names)
+    return E.load_policy()
 
 
 def cmd_run(args):
@@ -154,9 +188,10 @@ def cmd_run(args):
         log_file.close()
         return
 
+    policy = enemy_policy(args)
     bot = Bot(cap, target, lucky=lucky, auto_start=args.start,
               dry_run=args.dry, max_attempts=args.max_attempts,
-              max_bp=args.max_bp)
+              max_bp=args.max_bp, enemy_policy=policy)
     bot.force = args.force
     bot.keep_console = args.keep_console
     bot.hotkey = args.hotkey or ""
@@ -208,6 +243,10 @@ def build_parser():
     pr.add_argument("--keep-console", action="store_true", help="不最小化控制台（默认会最小化，免得挡住游戏）")
     pr.add_argument("--max-bp", type=int, default=0, dest="max_bp",
                     help="战力点上限，超过就放弃重开；0=不限")
+    pr.add_argument("--ban", default=None,
+                    help="敌人黑名单：抽到这些敌人就放弃重开，名字逗号分隔（如 解燥,断云叟）")
+    pr.add_argument("--only", default=None,
+                    help="敌人白名单：只留名单里的敌人，其余一律放弃重开")
     pr.add_argument("--hotkey", default="f11",
                     help="全局急停热键，默认 f11；空字符串关闭")
     pr.set_defaults(func=cmd_run)

@@ -12,7 +12,11 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
 from bqyw import bot as B  # noqa: E402
+from bqyw import enemies as E  # noqa: E402
 from bqyw.rules import SUIT_SUO, SUIT_TONG, SUIT_WAN, Card  # noqa: E402
 from bqyw.targets import CustomTarget  # noqa: E402
 
@@ -250,6 +254,42 @@ def main():
         b10.drop_round()
         check("连续点空 第 3 次停手", b10.drop_round(), "stop")
         check("连续点空 停因", b10.stop_reason, "forfeit_fail")
+
+
+        # ------------------------------------------------ 敌人名单：新翻出来的牌
+        # 拿真模板贴回卡面该在的位置，走的还是 art_box → 比对 → 名单 这条真实路径
+        book = E.Book()
+        sample = book.by_point(1)[0]
+        frame = np.full((1440, 2560, 3), 255, np.uint8)
+        box = E.art_box(0)
+        art = cv2.imdecode(np.fromfile(book.art_path(sample), np.uint8), cv2.IMREAD_COLOR)
+        frame[box.y1:box.y2, box.x1:box.x2] = cv2.resize(art, (box.w, box.h))
+        one = [Card(1, SUIT_TONG)]
+
+        t11 = Table([MISS])
+        b11, _ = make_bot(t11)
+        b11.book = book
+        b11.enemy = E.Policy(E.MODE_BAN, (sample.name,))
+        check("名单 命中返回敌人", b11._check_enemies(frame, one), sample.name)
+        check("名单 查过的不再查", b11._check_enemies(frame, one), None)
+
+        b11._checked = 0
+        b11.enemy = E.Policy(E.MODE_BAN, ("不存在的敌人",))
+        check("名单 不在名单里不弃", b11._check_enemies(frame, one), None)
+
+        b11._checked = 0
+        b11.enemy = E.Policy(E.MODE_ONLY, (sample.name,))
+        check("白名单 勾着就留", b11._check_enemies(frame, one), None)
+
+        b11._checked = 0
+        b11.enemy = E.Policy(E.MODE_ONLY, ("断云叟",))
+        check("白名单 没勾就弃", b11._check_enemies(frame, one), sample.name)
+
+        b11._checked = 0
+        b11.enemy = E.Policy(E.MODE_BAN, (sample.name,))
+        check("名单 没有画面不炸", b11._check_enemies(None, one), None)
+        check("名单 认不出就当没这个敌人",
+              b11._check_enemies(np.full((1440, 2560, 3), 255, np.uint8), one), None)
 
     finally:
         B.looks_like_draw_screen = real_screen

@@ -27,6 +27,8 @@ _enable_dpi_awareness()
 
 from bqyw import __version__, applog, paths  # noqa: E402
 from bqyw.bot import Abort, Bot  # noqa: E402
+from bqyw.enemies import (CN_MODE, MODE_CN, MODE_OFF, Book, Policy,  # noqa: E402
+                          load_policy, store_policy)
 from bqyw.hotkey import parse  # noqa: E402
 from bqyw.privilege import is_admin, relaunch_as_admin  # noqa: E402
 from bqyw.rules import (HAND_NAME_CN, POINT_ANY, SUITS, SUIT_UNKNOWN, Card,  # noqa: E402
@@ -69,6 +71,9 @@ class App(tk.Tk):
         self.v_dry = tk.BooleanVar(value=False)
         self.v_minimize = tk.BooleanVar(value=True)
         self.v_hotkey = tk.StringVar(value="f11")
+        self.v_enemy = tk.StringVar(value=MODE_CN[MODE_OFF])
+        self.book = Book()                     # 25 张敌人生绘，只有勾选面板和判定要用
+        self.enemy_policy = load_policy()      # 上次的名单从 config.json 读回来
         self.custom_targets: list[CustomTarget] = [
             CustomTarget(tuple(Card(p, SUIT_UNKNOWN) for p in (1, 2, 3, 4, 5)), ordered=False)]
         self._est_cache: dict = {}
@@ -116,6 +121,18 @@ class App(tk.Tk):
         ttk.Checkbutton(row2, text="运行后最小化",
                         variable=self.v_minimize).pack(side="left", padx=12)
 
+        row_enemy = ttk.Frame(top)
+        row_enemy.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(row_enemy, text="敌人名单").pack(side="left")
+        self.cb_enemy = ttk.Combobox(row_enemy, textvariable=self.v_enemy, width=7,
+                                     values=list(MODE_CN.values()), state="readonly")
+        self.cb_enemy.pack(side="left", padx=(6, 6))
+        self.cb_enemy.bind("<<ComboboxSelected>>", lambda _e: self._enemy_mode_changed())
+        ttk.Button(row_enemy, text="选择…", width=7, command=self._pick_enemies).pack(
+            side="left")
+        self.lbl_enemy = ttk.Label(row_enemy, text="", foreground="#777")
+        self.lbl_enemy.pack(side="left", padx=(10, 0))
+
         row3 = ttk.Frame(top)
         row3.pack(fill="x", padx=8, pady=(0, 8))
         self.lbl_est = ttk.Label(row3, text="", foreground="#555")
@@ -153,6 +170,7 @@ class App(tk.Tk):
         self.txt.pack(fill="both", expand=True, padx=6, pady=6)
 
         self._sync_estimate()
+        self._enemy_refresh()
 
     # ------------------------------------------------------------ 杂项
     def _append(self, line: str):
@@ -236,6 +254,85 @@ class App(tk.Tk):
                 self.v_target.set(MULTI)
             dlg.destroy()
             self._sync_estimate()
+
+        ttk.Button(btns, text="取消", command=dlg.destroy).pack(side="right")
+        ttk.Button(btns, text="确定", command=ok).pack(side="right", padx=6)
+
+    # ------------------------------------------------------------ 敌人名单
+    def _enemy_mode_changed(self):
+        mode = CN_MODE.get(self.v_enemy.get(), MODE_OFF)
+        self.enemy_policy = Policy(mode=mode, names=self.enemy_policy.names)
+        store_policy(self.enemy_policy)
+        self._enemy_refresh()
+
+    def _enemy_refresh(self):
+        p = self.enemy_policy
+        self.v_enemy.set(MODE_CN.get(p.mode, MODE_CN[MODE_OFF]))
+        total = len(self.book)
+        if p.mode == MODE_OFF:
+            self.lbl_enemy.configure(foreground="#777", text=f"关着（库里有 {total} 个）")
+        elif not p.names:
+            self.lbl_enemy.configure(foreground="#c00", text="名单是空的 → 不生效")
+        else:
+            head = "、".join(p.names[:3]) + ("…" if len(p.names) > 3 else "")
+            self.lbl_enemy.configure(foreground="#0a7",
+                                     text=f"已勾 {len(p.names)} 个：{head}")
+
+    def _pick_enemies(self):
+        """按战力点分组，看图勾敌人 —— 不用记名字。"""
+        if not len(self.book):
+            messagebox.showerror(APP_TITLE, "敌人模板没装上（templates/enemies.json 缺了）。")
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title("敌人名单")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        ttk.Label(dlg, text="黑名单 = 抽到就放弃重开；白名单 = 只留勾上的，其余一律放弃。",
+                  foreground="#333").pack(anchor="w", padx=12, pady=(10, 2))
+        ttk.Label(dlg, text="认牌靠立绘、不看名字；每个敌人只会在固定一个战力点出现，所以按点数分组。",
+                  foreground="#777").pack(anchor="w", padx=12, pady=(0, 8))
+
+        vars_ = {}
+        imgs = []
+        body = ttk.Frame(dlg)
+        body.pack(padx=12, pady=(0, 4))
+        for point in range(1, 6):
+            group = self.book.by_point(point)
+            if not group:
+                continue
+            row = ttk.LabelFrame(body, text=f"{point} 点（{len(group)} 种）")
+            row.pack(fill="x", pady=2)
+            for enemy in group:
+                cell = ttk.Frame(row, width=104)
+                cell.pack(side="left", padx=1, pady=2)
+                v = tk.BooleanVar(value=enemy.name in self.enemy_policy.names)
+                vars_[enemy.name] = v
+                try:
+                    img = tk.PhotoImage(file=self.book.art_path(enemy)).subsample(2)
+                    imgs.append(img)
+                except tk.TclError:
+                    img = None
+                ttk.Checkbutton(cell, text=enemy.name, variable=v, image=img,
+                                compound="top", style="Toolbutton").pack()
+
+        dlg._imgs = imgs                    # Tk 图片不挂住就会被 GC 掉，只剩空框
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", padx=12, pady=(6, 12))
+        ttk.Button(btns, text="全选",
+                   command=lambda: [v.set(True) for v in vars_.values()]).pack(side="left")
+        ttk.Button(btns, text="清空",
+                   command=lambda: [v.set(False) for v in vars_.values()]).pack(
+            side="left", padx=6)
+
+        def ok():
+            picked = tuple(sorted(n for n, v in vars_.items() if v.get()))
+            self.enemy_policy = Policy(mode=self.enemy_policy.mode, names=picked)
+            store_policy(self.enemy_policy)
+            self._enemy_refresh()
+            dlg.destroy()
 
         ttk.Button(btns, text="取消", command=dlg.destroy).pack(side="right")
         ttk.Button(btns, text="确定", command=ok).pack(side="right", padx=6)
@@ -492,7 +589,8 @@ class App(tk.Tk):
             f"# 目标 {target}   今日好运 {self.v_lucky.get()}",
             f"# 重开上限 {max_attempts or '不限'}   战力点上限 {max_bp or '不限'}   "
             f"只读 {'是' if self.v_dry.get() else '否'}",
-            f"# 急停键 {hotkey or '无'}   管理员 {is_admin()}")
+            f"# 急停键 {hotkey or '无'}   管理员 {is_admin()}",
+            f"# 敌人名单 {self.enemy_policy}")
         self._append(f"{applog.stamp()} ── 开始：{target}  "
                      f"重开上限={max_attempts or '不限'}  战力点上限={max_bp or '不限'}"
                      + ("  只读" if self.v_dry.get() else ""))
@@ -512,6 +610,7 @@ class App(tk.Tk):
             cap = Capture()
             bot = Bot(cap, target, lucky=lucky, dry_run=dry,
                       max_attempts=max_attempts, max_bp=max_bp,
+                      enemy_policy=self.enemy_policy,
                       logger=lambda s: self.q.put(("log", s)),
                       on_state=lambda st: self.q.put(("state", st)),
                       stop_flag=self.stop_event)
@@ -702,9 +801,26 @@ def _selftest() -> int:
         return (f"数字自比 {score:.2f}，找墨迹 3 块，"
                 f"轮次判读 {rnd}（模板匹配与缩放正常）")
 
+    def check_enemies():
+        """敌人名单：模板在不在、立绘比对能不能跑、名单读不读得出。"""
+        from bqyw import enemies as E
+        book = E.Book()
+        if not len(book):
+            raise RuntimeError("没有敌人模板（templates/enemies.json 缺了）")
+        one = book.enemies[0]
+        art = E._read_gray(book.art_path(one))
+        hit, score = book.best(art, one.point)
+        if hit is None or hit.name != one.name or score < book.threshold:
+            raise RuntimeError(
+                f"自己认不出自己：{one.name} → {hit.name if hit else '?'} {score:.3f}")
+        return (f"{len(book)} 个敌人（1 点 {len(book.by_point(1))} 种 … "
+                f"5 点 {len(book.by_point(5))} 种），自认 {hit.name} {score:.2f}，"
+                f"名单 {E.load_policy().label()}")
+
     probe("急停键", check_hotkey)
     probe("坐标基准", check_geometry)
     probe("识别链路", check_vision)
+    probe("敌人名单", check_enemies)
 
     text = "\n".join(rows) + f"\n\n结论：{'通过' if not bad else f'{bad} 项失败'}\n"
     try:

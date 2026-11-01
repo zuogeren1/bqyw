@@ -11,6 +11,9 @@ venv/
 # ---- 运行产物 ----
 logs/
 *.log
+# 用户自己的设置（敌人名单就在里面），不进仓库
+config.json
+config.json.tmp
 .work/
 _scratch/
 

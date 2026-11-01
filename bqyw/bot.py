@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import actions, geometry as G, privilege, screen as screenmod
+from . import actions, enemies as enemy_mod, geometry as G, privilege, screen as screenmod
 from .deck import MAX_DRAWS
 from .rules import (HAND_NAME_CN, MULT, Hand, all_hands, best_hand, score)
 from .targets import HandTarget, TargetBase
@@ -109,6 +109,7 @@ class Stats:
     forfeits: int = 0
     best_seen: Hand = Hand.HIGH
     best_score: int = 0
+    enemy_drops: int = 0          # 因为敌人名单而放弃的次数
     mismatch: int = 0
     gaps: list = field(default_factory=list)      # 相邻两张牌的间隔（秒）
     history: list = field(default_factory=list)
@@ -118,7 +119,7 @@ class Bot:
     def __init__(self, capture, target: Hand, lucky: Hand | None = None,
                  auto_start: bool = False, dry_run: bool = False,
                  max_attempts: int = 0, verbose: bool = True, poll: float = 0.25,
-                 max_bp: int = 0,
+                 max_bp: int = 0, enemy_policy=None,
                  logger=None, on_state=None, stop_flag=None):
         self.cap = capture
         self.ts = TemplateSet()
@@ -128,6 +129,11 @@ class Bot:
         self.dry_run = dry_run
         self.max_attempts = max_attempts
         self.max_bp = max_bp            # >0 时，战力点超过它就主动放弃重开
+        # 敌人名单（黑/白名单）：关着时完全不加载模板，零开销
+        self.enemy = enemy_policy or enemy_mod.OFF
+        self.book = None
+        self._checked = 0               # 这一轮已经查过名单的牌数
+        self._enemy_streak = 0          # 连续因为名单放弃了几轮
         self.verbose = verbose
         self.poll = poll
         self.logger = logger            # GUI 用：把日志往队列里丢
@@ -272,6 +278,42 @@ class Bot:
         # 之前每次减 0.02 一路滑到 1.25，然后每隔十来张就点空一次，来回抵消
         self.click_delay = max(CLICK_DELAY_MIN,
                                self.click_delay - CLICK_DELAY_STEP_DOWN)
+
+    def _check_enemies(self, frame, cards) -> str | None:
+        """把这一轮**新翻出来的**牌逐张对一遍敌人名单；命中就返回敌人名字。
+
+        只查新牌：认过的牌不会变，重复比对纯属烧 CPU。
+        认出但不在名单里不写日志 —— 每张都写会把日志刷满。
+        """
+        if not self.enemy.active() or self.book is None or frame is None:
+            return None
+        if len(cards) < self._checked:          # 牌桌被清空过，从头查
+            self._checked = 0
+        for i in range(self._checked, len(cards)):
+            if cards[i].point <= 0:
+                continue
+            box = enemy_mod.art_box(i)
+            hit, score = self._match_enemy(frame, box, cards[i].point)
+            if hit is None or score < self.book.threshold:
+                who = f"最像 {hit.name} {score:.2f}" if hit is not None else "没一个像"
+                self.log(f"     第 {i + 1} 张认不出敌人（{who}）")
+                continue
+            if self.enemy.should_drop(hit.name):
+                self._checked = i + 1
+                return hit.name
+        self._checked = len(cards)
+        return None
+
+    def _match_enemy(self, frame, box, point: int):
+        """裁立绘比对；分数卡在灰区就再抓一帧 —— 多半是翻牌动画还没走完。"""
+        hit, score = self.book.best(frame[box.y1:box.y2, box.x1:box.x2], point)
+        if self.book.threshold > score >= enemy_mod.WEAK_NCC:
+            time.sleep(0.12)
+            again = self.cap.grab_region(box.x1, box.y1, box.x2, box.y2)
+            hit2, score2 = self.book.best(again, point)
+            if score2 > score:
+                hit, score = hit2, score2
+        return hit, score
 
     def draw(self, before: int, window: float = DRAW_WINDOW) -> list:
         """点「抽牌」并等新牌，直到手牌比 before 多一张。
@@ -481,6 +523,8 @@ class Bot:
             gaps = sorted(self.stats.gaps[-200:])
             if gaps:
                 base += f"，出牌间隔中位 {gaps[len(gaps) // 2]:.2f}s"
+        if self.stats.enemy_drops:
+            base += f"，因名单弃 {self.stats.enemy_drops} 轮"
         if self.stats.mismatch:
             base += f"（表格抢跑 {self.stats.mismatch} 次，属正常）"
         return base
@@ -544,6 +588,18 @@ class Bot:
                 need.append(f"花色 {miss['suit']}")
             self.log("  [!] 模板缺口：" + "，".join(need) + " —— 遇到认不出的牌会停下来")
         self.log(f"抓取源：{self.cap.title}" + ("（只读模式）" if self.dry_run else ""))
+
+        # 敌人名单：只在真的要用时才加载 25 张立绘模板
+        if self.enemy.active():
+            self.book = enemy_mod.Book()
+            if not len(self.book):
+                self.log("  [!] 敌人模板没装上（templates/enemies.json），名单不生效")
+                self.enemy = enemy_mod.OFF
+            else:
+                self.log(f"敌人名单：{self.enemy}")
+                miss = enemy_mod.unknown_names(self.enemy.names, self.book)
+                if miss:
+                    self.log(f"  [!] 这些名字模板库里没有，永远不会命中：{'、'.join(miss)}")
 
         # 坐标按实际画面尺寸缩放：换分辨率后所有 Box 都要重算
         try:
@@ -707,6 +763,22 @@ class Bot:
             self.log(f"   [{n}张] {[(c.point, c.suit) for c in cards]} "
                      f"牌型={HAND_NAME_CN[best]} 战力点={sum(c.point for c in cards)}")
 
+            # ---- 敌人名单：刚翻出来的牌命中名单就直接重开，不用等牌型判完
+            banned = self._check_enemies(frame, cards)
+            if banned:
+                self.stats.enemy_drops += 1
+                self._enemy_streak += 1
+                what = "命中黑名单" if self.enemy.mode != enemy_mod.MODE_ONLY else "不在白名单"
+                self.log(f"     {what}「{banned}」，放弃重开")
+                if self._enemy_streak >= enemy_mod.MAX_DROPS:
+                    self.log(f"\n[!] 连着 {self._enemy_streak} 轮都撞名单，"
+                             f"大概率是名单配得太宽，已停止。")
+                    self.stop_reason = "enemy_ban"
+                    return self.stop_reason
+                if self.drop_round() == "stop":
+                    return self.stop_reason
+                continue
+
             # 战力点上限：超过就注定打不动，直接重开，别浪费时间
             if self.max_bp and sum(c.point for c in cards) > self.max_bp:
                 self.log(f"     战力点 {sum(c.point for c in cards)} > 上限 {self.max_bp}，放弃")
@@ -714,6 +786,7 @@ class Bot:
                     return self.stop_reason
                 continue
 
+            self._enemy_streak = 0        # 一轮抽满都没撞名单，连着撞的计数清零
             if left <= 0:
                 if self.drop_round() == "stop":
                     return self.stop_reason
