@@ -9,4 +9,4 @@ for _name in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
     _os.environ.setdefault(_name, "1")
 del _name
 
-__version__ = "1.1.3"
+__version__ = "1.2.0"
