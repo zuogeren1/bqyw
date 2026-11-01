@@ -48,7 +48,12 @@ def locate_parts(gray: np.ndarray, slot: int, ox: int = 0, oy: int = 0):
     if reg.size == 0:
         return None
     m = (reg < INK_THRESHOLD).astype(np.uint8)
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    # 闭运算的核必须跟着画面大小走：1440p 下 3×3 正好把断开的笔画连起来，
+    # 但 720p 上数字只有 20px 高、右边紧挨着花色图标，3×3 会把两者糊成一个块
+    #（实测 720p：3×3 五个槽全认不出，不做闭运算全对；1080p/1440p 两种都行）。
+    ks = 3 if G.SCALE >= 0.7 else 1
+    if ks > 1:
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((ks, ks), np.uint8))
     n, _lab, st, _cen = cv2.connectedComponentsWithStats(m, 8)
     comps = [(st[i][0], st[i][1], st[i][2], st[i][3], st[i][4])
              for i in range(1, n) if st[i][4] >= G.area(MIN_COMPONENT)]
