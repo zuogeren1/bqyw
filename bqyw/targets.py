@@ -294,6 +294,9 @@ def estimate_attempts(target: TargetBase) -> float:
         p = completion_probability_pred(
             lambda cards: target.matches(cards, MAX_DRAWS - len(cards)))
         return 1.0 / p if p > 0 else float("inf")
+    if not isinstance(target, CustomTarget):
+        # 走到这儿只可能是 CustomTarget；显式挡一下，免得将来新子类在这里 AttributeError
+        raise TypeError(f"estimate_attempts 不认识的目标类型：{type(target).__name__}")
     if target.ordered:
         p = _ordered_probability(target)
     else:

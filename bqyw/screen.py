@@ -152,7 +152,7 @@ class Capture:
 
     def __init__(self, prefer_window: bool = True, titles=DEFAULT_TITLES,
                  window_title: str | None = None):
-        self.sct = mss.mss()
+        self.sct = mss.MSS()
         self.hwnd = None
         self.matched_title = "<全屏>"
         if prefer_window:
