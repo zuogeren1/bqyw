@@ -31,6 +31,7 @@ from . import config, geometry as G, paths
 
 CANON = 128                     # 立绘归一化边长
 MIN_NCC = 0.78                  # 认定阈值
+CONFIRM_NCC = 0.88              # 一眼定案线：低于它的先记下，下一帧还是同一个才弃
 WEAK_NCC = 0.60                 # 灰区下界：这一带多半是翻牌动画没走完，值得再抓一帧
 
 ART_DX = (6, 341)               # 立绘横向（相对卡槽左边缘）

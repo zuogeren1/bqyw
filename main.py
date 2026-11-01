@@ -157,6 +157,7 @@ def cmd_run(args):
     sys.stdout = applog.Tee(sys.__stdout__, log_file)
     print(f"日志：{log_path}（保留最近 {applog.MAX_LOGS} 份）")
 
+    policy = enemy_policy(args)
     cap = Capture(prefer_window=not args.fullscreen)
 
     if args.once:
@@ -172,6 +173,9 @@ def cmd_run(args):
         print(f"抓取源：{cap.title}  状态：{cap.status()}  画面 {w}×{h}（缩放 {s:.3f}）")
         print(f"像抽牌界面：{looks_like_draw_screen(frame)}")
         print(f"轮次 {r['round']}，{r['count']} 张 {[(c.point, c.suit) for c in r['cards']]}")
+        from bqyw.bot import enemy_report
+        for line in enemy_report(frame, r["cards"], policy):
+            print(line)
         print(f"战力点 {r['sum']}（表格高亮列 {r['highlight']}，应为 {r['table_bp']}）"
               f"  生效牌型 {HAND_NAME_CN[r['best']]}  预估奖励点 {r['score']}")
         left = 5 - r["count"]
@@ -188,7 +192,6 @@ def cmd_run(args):
         log_file.close()
         return
 
-    policy = enemy_policy(args)
     bot = Bot(cap, target, lucky=lucky, auto_start=args.start,
               dry_run=args.dry, max_attempts=args.max_attempts,
               max_bp=args.max_bp, enemy_policy=policy)

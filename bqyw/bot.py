@@ -7,9 +7,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
-from . import actions, enemies as enemy_mod, geometry as G, privilege, screen as screenmod
+from . import actions, applog, enemies as enemy_mod, geometry as G, privilege, screen as screenmod
 from .deck import MAX_DRAWS
 from .rules import (HAND_NAME_CN, MULT, Hand, all_hands, best_hand, score)
 from .targets import HandTarget, TargetBase
@@ -133,6 +134,10 @@ class Bot:
         self.enemy = enemy_policy or enemy_mod.OFF
         self.book = None
         self._checked = 0               # 这一轮已经查过名单的牌数
+        self._pending: dict[int, float] = {}   # 看不清的牌：槽位 → 目前最高分
+        self._confirm: dict[int, tuple] = {}   # 看着像但分数不够硬的：槽位 → (敌人, 分数)
+        self._dumps = 0                 # 已经存了几张"看不清"的卡面（一次运行最多 5 张）
+        self._hit_score = 0.0           # 最近一次命中名单时的立绘分数（写日志用）
         self._enemy_streak = 0          # 连续因为名单放弃了几轮
         self.verbose = verbose
         self.poll = poll
@@ -280,40 +285,85 @@ class Bot:
                                self.click_delay - CLICK_DELAY_STEP_DOWN)
 
     def _check_enemies(self, frame, cards) -> str | None:
-        """把这一轮**新翻出来的**牌逐张对一遍敌人名单；命中就返回敌人名字。
+        """把这一帧的牌对一遍敌人名单；确认命中就返回敌人名字。
 
-        只查新牌：认过的牌不会变，重复比对纯属烧 CPU。
-        认出但不在名单里不写日志 —— 每张都写会把日志刷满。
+        **不睡、不额外抓屏**：认不清的牌记进 _pending，等下一张牌翻出来、
+        主循环本来就抓了新帧时，顺带和新牌一起认 —— 那时翻牌动画也早走完了。
+        所以识别对节拍零影响：一帧只比一次，算的是同一份像素。
+
+        **一眼不够清楚的两帧定案**：分数 ≥ 0.88 直接弃；0.78~0.88 之间先记进
+        _confirm，下一帧还是同一个敌人才弃 —— 这一段多半是半张立绘，宁可晚弃一张。
+
+        命中优先判新牌：新翻出来就撞名单的话，不用等旧牌确认就先弃。
+        认不出就当没这个敌人（认不出不弃，绝不乱弃）。
         """
         if not self.enemy.active() or self.book is None or frame is None:
             return None
-        if len(cards) < self._checked:          # 牌桌被清空过，从头查
+        if len(cards) < self._checked:          # 牌桌被清空过：上一轮没认出的作废
+            self._flush_pending(frame)
             self._checked = 0
-        for i in range(self._checked, len(cards)):
-            if cards[i].point <= 0:
-                continue
-            box = enemy_mod.art_box(i)
-            hit, score = self._match_enemy(frame, box, cards[i].point)
-            if hit is None or score < self.book.threshold:
-                who = f"最像 {hit.name} {score:.2f}" if hit is not None else "没一个像"
-                self.log(f"     第 {i + 1} 张认不出敌人（{who}）")
-                continue
-            if self.enemy.should_drop(hit.name):
-                self._checked = i + 1
-                return hit.name
+
+        # 这一帧要认的：新翻出来的 + 没认清的 + 看着像、等确认的
+        todo = (list(range(self._checked, len(cards)))
+                + sorted(self._pending) + sorted(self._confirm))
         self._checked = len(cards)
+        for i in todo:
+            if i >= len(cards) or cards[i].point <= 0:
+                self._pending.pop(i, None)
+                self._confirm.pop(i, None)
+                continue
+            name, score = self._match_enemy(frame, i, cards[i].point)
+            if name is None:
+                # 分数留着，只涨不跌：下一帧是更晚的画面，认得更清
+                self._pending[i] = max(score, self._pending.get(i, 0.0))
+                self._confirm.pop(i, None)
+                continue
+            self._pending.pop(i, None)
+            if not self.enemy.should_drop(name):
+                self._confirm.pop(i, None)      # 认出来了但不在名单里，不用再确认
+                continue
+            if score >= enemy_mod.CONFIRM_NCC:
+                self._hit_score = score         # 一眼就够清楚
+                return name
+            if self._confirm.get(i, (None, 0.0))[0] == name:
+                self._hit_score = score         # 下一帧还是同一个敌人 → 确认
+                return name
+            self._confirm[i] = (name, score)    # 先记下，下一帧再定
         return None
 
-    def _match_enemy(self, frame, box, point: int):
-        """裁立绘比对；分数卡在灰区就再抓一帧 —— 多半是翻牌动画还没走完。"""
-        hit, score = self.book.best(frame[box.y1:box.y2, box.x1:box.x2], point)
-        if self.book.threshold > score >= enemy_mod.WEAK_NCC:
-            time.sleep(0.12)
-            again = self.cap.grab_region(box.x1, box.y1, box.x2, box.y2)
-            hit2, score2 = self.book.best(again, point)
-            if score2 > score:
-                hit, score = hit2, score2
-        return hit, score
+    def _match_enemy(self, frame, slot: int, point: int):
+        """裁立绘比对，返回 (认出来的名字 or None, 分数)。"""
+        box = enemy_mod.art_box(slot)
+        patch = frame[box.y1:box.y2, box.x1:box.x2]
+        hit, score = self.book.best(patch, point)
+        if hit is None:
+            return None, 0.0
+        return (hit.name if score >= self.book.threshold else None), score
+
+    def _flush_pending(self, frame=None) -> None:
+        """一轮结束：还没认出来的牌，记一行日志（有画面就顺手存一张卡面）。"""
+        for slot, score in sorted(self._pending.items()):
+            self.log(f"     第 {slot + 1} 张一直没认出来（最像 {score:.2f}）")
+            if frame is not None:
+                self._dump_art(frame, slot, score)
+        self._pending.clear()
+        self._confirm.clear()
+
+    def _dump_art(self, frame, slot: int, score: float) -> None:
+        """认不清的卡面存一张（一次运行最多 5 张），出问题时直接发回来。"""
+        if self._dumps >= 5:
+            return
+        box = enemy_mod.art_box(slot)
+        patch = frame[box.y1:box.y2, box.x1:box.x2]
+        if patch is None or patch.size == 0:
+            return
+        try:
+            path = applog.log_dir() / f"enemy-{time.strftime('%H%M%S')}-第{slot + 1}张-{score:.2f}.png"
+            cv2.imencode(".png", patch)[1].tofile(str(path))
+        except Exception:                       # noqa: BLE001
+            return
+        self._dumps += 1
+        self.log(f"     （这张卡面存了一份：{path.name}）")
 
     def draw(self, before: int, window: float = DRAW_WINDOW) -> list:
         """点「抽牌」并等新牌，直到手牌比 before 多一张。
@@ -470,6 +520,7 @@ class Bot:
 
     def drop_round(self) -> str:
         """放弃这一轮。返回 "ok" / "retry"（这一下点空了）/ "stop"（复核没过）。"""
+        self._flush_pending()
         if self.ts.rounds and not self.round_is_one():
             self.log("\n[!] 轮次复核没读到「第 1 轮」：第二轮放弃会结束整场演算，已停止。")
             self.stop_reason = "round_unknown"
@@ -769,7 +820,7 @@ class Bot:
                 self.stats.enemy_drops += 1
                 self._enemy_streak += 1
                 what = "命中黑名单" if self.enemy.mode != enemy_mod.MODE_ONLY else "不在白名单"
-                self.log(f"     {what}「{banned}」，放弃重开")
+                self.log(f"     {what}「{banned}」（立绘 {self._hit_score:.3f}），放弃重开")
                 if self._enemy_streak >= enemy_mod.MAX_DROPS:
                     self.log(f"\n[!] 连着 {self._enemy_streak} 轮都撞名单，"
                              f"大概率是名单配得太宽，已停止。")
@@ -810,6 +861,43 @@ class Bot:
                 time.sleep(0.05)
         except Exception:
             pass
+
+
+def enemy_report(frame, cards, policy) -> list:
+    """读一帧时，把每个位置上认到的敌人和分数列出来（名单关着就什么都不列）。
+
+    认准（分数 ≥ 阈值）才算认出；没认准的写"最像谁、几分"，方便判断是动画没走完
+    还是模板对不上。名单命中会写"→ 弃"。
+    """
+    if policy is None or policy.mode == enemy_mod.MODE_OFF:
+        return []
+    book = enemy_mod.Book()
+    if not len(book):
+        return ["   [!] 敌人模板没装上（templates/enemies.json 缺了），名单不生效"]
+    lines = [f"   敌人名单：{policy.label()}（阈值 {book.threshold:.2f}）"]
+    if not cards:
+        lines.append("   牌桌是空的，没有可认的牌")
+        return lines
+    for i, c in enumerate(cards):
+        if c.point <= 0:
+            continue
+        box = enemy_mod.art_box(i)
+        patch = frame[box.y1:box.y2, box.x1:box.x2]
+        hit, score = book.best(patch, c.point)
+        if hit is None:
+            lines.append(f"   第 {i + 1} 张（{c.point} 点）：认不出")
+        elif score >= book.threshold:
+            if not policy.should_drop(hit.name):
+                verdict = "留"
+            elif policy.mode == enemy_mod.MODE_BAN:
+                verdict = "弃（在名单里）"
+            else:
+                verdict = "弃（不在白名单里）"
+            lines.append(f"   第 {i + 1} 张（{c.point} 点）：{hit.name} {score:.3f} → {verdict}")
+        else:
+            lines.append(f"   第 {i + 1} 张（{c.point} 点）：最像 {hit.name} {score:.3f}，"
+                         f"不到阈值 → 不弃")
+    return lines
 
 
 def dry_analyse(frame, target, lucky: Hand | None = None) -> dict:

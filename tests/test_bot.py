@@ -12,6 +12,9 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -285,11 +288,86 @@ def main():
         b11.enemy = E.Policy(E.MODE_ONLY, ("断云叟",))
         check("白名单 没勾就弃", b11._check_enemies(frame, one), sample.name)
 
+        # 「读一帧」要把每个位置的分数列出来（名单关着时不列）
+        rows = B.enemy_report(frame, one, E.Policy(E.MODE_BAN, (sample.name,)))
+        check("读一帧 带名单头", "敌人名单" in rows[0], True)
+        check("读一帧 列出敌人与分数",
+              any(sample.name in r and "0.9" in r for r in rows[1:]), True)
+        check("读一帧 命中名单标弃", any("→ 弃" in r for r in rows), True)
+        check("读一帧 名单关着不列", B.enemy_report(frame, one, E.Policy()), [])
+        check("读一帧 空牌桌也能列",
+              len(B.enemy_report(frame, [], E.Policy(E.MODE_BAN, ("x",)))), 2)
+
         b11._checked = 0
         b11.enemy = E.Policy(E.MODE_BAN, (sample.name,))
         check("名单 没有画面不炸", b11._check_enemies(None, one), None)
         check("名单 认不出就当没这个敌人",
               b11._check_enemies(np.full((1440, 2560, 3), 255, np.uint8), one), None)
+
+        # 翻牌动画没走完：分数够不上阈值时**不能急着当"没这个敌人"**，
+        # 实测真身能低到 0.68 —— 记进待认，下一帧再认。
+        tmp = tempfile.mkdtemp(prefix="bqyw-dump-")
+        real_dir = B.applog.log_dir
+        B.applog.log_dir = lambda: Path(tmp)
+        try:
+            blank = np.full((1440, 2560, 3), 255, np.uint8)
+            b11._checked = 0
+            b11._pending.clear()
+            b11.enemy = E.Policy(E.MODE_BAN, (sample.name,))
+            check("看不清 先不下结论", b11._check_enemies(blank, one), None)
+            check("看不清 记进待认", len(b11._pending), 1)
+            check("下一帧认准就命中", b11._check_enemies(frame, one), sample.name)
+            check("认准后待认清空", 0 in b11._pending, False)
+
+            # 不睡也不额外抓屏：下一张牌翻出来时，同一帧里新旧一起认
+            b11._checked = 0
+            b11._pending.clear()
+            check("新的先不下结论", b11._check_enemies(blank, one), None)
+            two = one + [Card(2, SUIT_TONG)]
+            check("下一张出来顺带认出来", b11._check_enemies(frame, two), sample.name)
+
+            # 一眼不够清楚（0.78~0.88）：先记下，下一帧还是它才弃
+            class FakeBook:
+                threshold = 0.78
+
+                def __init__(self, scores):
+                    self.scores = list(scores)
+                    self.enemy = book.by_point(1)[0]
+
+                def best(self, patch, point):
+                    s = self.scores.pop(0) if self.scores else 0.99
+                    return E.Hit(self.enemy, s), s
+
+            def reset(kind):
+                b11._checked = 0
+                b11._pending.clear()
+                b11._confirm.clear()
+                b11.book = FakeBook(kind)
+                b11.enemy = E.Policy(E.MODE_BAN, (sample.name,))
+
+            reset([0.83, 0.83])
+            check("弱命中 第一帧不弃", b11._check_enemies(frame, one), None)
+            check("弱命中 记进待确认", 0 in b11._confirm, True)
+            check("弱命中 第二帧同一敌人就弃", b11._check_enemies(frame, one), sample.name)
+
+            reset([0.95])
+            check("强命中 一眼就弃", b11._check_enemies(frame, one), sample.name)
+
+            reset([0.80, 0.60])
+            check("弱命中 第一帧先记下", b11._check_enemies(frame, one), None)
+            check("弱命中 下一帧变模糊不弃", b11._check_enemies(frame, one), None)
+            check("弱命中 变模糊后清掉待确认", 0 in b11._confirm, False)
+            b11.book = book
+
+            b11._checked = 0
+            b11._pending.clear()
+            check("始终看不清 不弃", b11._check_enemies(blank, one), None)
+            b11._flush_pending(blank)
+            check("一轮结束 待认清空", len(b11._pending), 0)
+            check("一轮结束 存了一张卡面", len(list(Path(tmp).glob("enemy-*.png"))), 1)
+        finally:
+            B.applog.log_dir = real_dir
+
 
     finally:
         B.looks_like_draw_screen = real_screen

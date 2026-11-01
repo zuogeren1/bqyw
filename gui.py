@@ -657,6 +657,9 @@ class App(tk.Tk):
             self._append(f"   像抽牌界面 {looks_like_draw_screen(frame)}")
             self._append(f"   轮次 {ts.read_round(frame)}，{len(cards)} 张 "
                          f"{[(c.point, c.suit) for c in cards]}")
+            from bqyw.bot import enemy_report
+            for line in enemy_report(frame, cards, self.enemy_policy):
+                self._append(line)
             from bqyw.rules import best_hand
             self.q.put(("state", {
                 "round": ts.read_round(frame),
