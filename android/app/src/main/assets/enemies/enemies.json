@@ -2,7 +2,7 @@
  "version": 1,
  "canon": 128,
  "threshold": 0.78,
- "source": "100 轮扫描（.notes/p2），25 个敌人，2026-10-31",
+ "source": "100 轮扫描，25 个敌人，2026-10-31",
  "enemies": [
   {
    "slug": "e18",

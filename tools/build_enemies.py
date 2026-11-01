@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """把侦察数据整理成运行时模板。
 
-输入是 100 轮扫描的产物（`.notes/data/p2`，不进仓库）：
+输入是侦察扫描产出的一个目录（**不进仓库**，要自己备），形状是：
 
     final.json            25 个敌人的名字 / 战力点 / 抗性 / 出现次数
     <eid>/art.png         128×128 立绘（由抽牌页卡面裁出来再缩到 128）
@@ -12,8 +12,8 @@
     templates/enemies/<eid>.png  128×128 立绘模板
 
 用法：
-    python tools/build_enemies.py                 # 用默认路径
-    python tools/build_enemies.py --src .notes/data/p2 --dst templates
+    python tools/build_enemies.py --src <扫描输出目录>
+    python tools/build_enemies.py --src <扫描输出目录> --dst templates
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ ROOT = os.path.dirname(HERE)
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", default=os.path.join(ROOT, ".notes", "data", "p2"))
+    ap.add_argument("--src", required=True, help="侦察扫描的产物目录（含 final.json）")
     ap.add_argument("--dst", default=os.path.join(ROOT, "templates"))
     args = ap.parse_args()
 
@@ -67,7 +67,7 @@ def main() -> int:
         "version": 1,
         "canon": 128,
         "threshold": 0.78,
-        "source": "100 轮扫描（.notes/data/p2），25 个敌人，2026-10-31",
+        "source": "100 轮扫描，25 个敌人，2026-10-31",
         "enemies": enemies,
     }
     path = os.path.join(args.dst, "enemies.json")

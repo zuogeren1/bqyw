@@ -6,6 +6,7 @@
 """
 import os
 import sys
+import tempfile
 
 import cv2
 import numpy as np
@@ -90,11 +91,12 @@ def main():
         wmax = max(r.shape[1] for r in rows)
         rows = [np.hstack([r, np.full((r.shape[0], wmax - r.shape[1], 3), 30, np.uint8)])
                 for r in rows]
-        # 过程图统一放本地笔记目录，仓库里不留工作目录
-        gallery = os.path.join(ROOT, ".notes", "_scratch", "work")
+        # 对照图是给人看的中间产物：放临时目录，不往仓库里塞，也不依赖任何本地目录
+        gallery = os.path.join(tempfile.gettempdir(), "bqyw-tpl-gallery")
         os.makedirs(gallery, exist_ok=True)
-        cv2.imencode(".png", np.vstack(rows))[1].tofile(
-            os.path.join(gallery, "tpl_gallery.png"))
+        out_path = os.path.join(gallery, "tpl_gallery.png")
+        cv2.imencode(".png", np.vstack(rows))[1].tofile(out_path)
+        print("模板对照图 →", out_path)
     print("模板已写入", OUT)
 
 
