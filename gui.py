@@ -34,7 +34,8 @@ from bqyw.privilege import is_admin, relaunch_as_admin  # noqa: E402
 from bqyw.rules import (HAND_NAME_CN, POINT_ANY, SUITS, SUIT_SAME,  # noqa: E402
                         SUIT_UNKNOWN, Card, Hand)
 from bqyw.targets import (ANY, CustomTarget, HandTarget, MultiTarget,  # noqa: E402
-                          estimate_attempts)
+                          estimate_attempts, load_custom_targets,
+                          store_custom_targets)
 
 TARGETS = ["四条", "同花", "葫芦", "顺子", "三条", "两对", "对子", "同花顺", "自定义"]
 MULTI = "多选"
@@ -75,7 +76,8 @@ class App(tk.Tk):
         self.v_enemy = tk.StringVar(value=MODE_CN[MODE_OFF])
         self.book = Book()                     # 25 张敌人生绘，只有勾选面板和判定要用
         self.enemy_policy = load_policy()      # 上次的名单从 config.json 读回来
-        self.custom_targets: list[CustomTarget] = [
+        # 自定义目标存在 config.json 里（和敌人名单同一个文件），重开、升级都还在
+        self.custom_targets: list[CustomTarget] = load_custom_targets() or [
             CustomTarget(tuple(Card(p, SUIT_UNKNOWN) for p in (1, 2, 3, 4, 5)), ordered=False)]
         self._est_cache: dict = {}
         self.v_status = tk.StringVar(value="就绪")
@@ -493,6 +495,7 @@ class App(tk.Tk):
                 messagebox.showinfo(APP_TITLE, "至少要写一张牌。", parent=dlg)
                 return
             self.custom_targets = out
+            store_custom_targets(out)       # 下次打开还是这几组
             if self.v_target.get() != "自定义":
                 self.v_target.set("自定义")
             dlg.destroy()

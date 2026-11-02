@@ -3,6 +3,7 @@
 import math
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -10,7 +11,8 @@ from bqyw.rules import (POINT_ANY, SUIT_SAME, SUIT_SUO, SUIT_TONG,  # noqa: E402
                         SUIT_UNKNOWN, SUIT_WAN, Card)
 from bqyw.rules import Hand  # noqa: E402
 from bqyw.targets import (CustomTarget, HandTarget, MultiTarget,  # noqa: E402
-                          UnionTarget, estimate_attempts)
+                          UnionTarget, estimate_attempts, load_custom_targets,
+                          store_custom_targets)
 
 OK = []
 
@@ -230,5 +232,33 @@ try:
     raise AssertionError("一个目标应该报错")
 except ValueError:
     OK.append("多选至少要两个")
+
+# ---------------------------------------------------------------- 存档（config.json）
+# 自定义目标要跟着 exe 走：重开、升级后还是上次写的那几组
+from bqyw import config  # noqa: E402
+
+with tempfile.TemporaryDirectory() as td:
+    real_path = config.path
+    config.path = lambda: os.path.join(td, "config.json")
+    try:
+        config.save({"enemies": {"mode": "ban", "names": ["精锐行刑人"]}})
+        saved = [CustomTarget.parse("5 5同 5同", ordered=True),
+                 CustomTarget.parse("3筒 3筒 3索 5萬 5")]
+        check("写回成功", store_custom_targets(saved), True)
+        back = load_custom_targets()
+        check("读回来一模一样", back, saved)
+        check("每组自己带顺序", [t.ordered for t in back], [True, False])
+        check("敌人名单没被冲掉", config.load().get("enemies"), {"mode": "ban", "names": ["精锐行刑人"]})
+
+        # 手写坏的条目跳过，别带崩整个文件（9筒 是看不懂的牌，「同 5」第 1 格不能写同）
+        cfg = config.load()
+        cfg["custom"]["items"] += [{"spec": "9筒"}, {"spec": "同 5"}]
+        config.save(cfg)
+        check("坏条目跳过", len(load_custom_targets()), 2)
+
+        config.save({})
+        check("没有配置就是空表", load_custom_targets(), [])
+    finally:
+        config.path = real_path
 
 print(f"全部 {len(OK)} 项通过")

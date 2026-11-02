@@ -108,10 +108,21 @@ class Overlay(private val ctx: Context) {
     /** 固定在面板底部的「开始 / 停止」：只在主页面出现，滚动时不会被推走。 */
     private var footer: LinearLayout? = null
 
+    /** 自定义目标按不按顺序（界面上那个复选框）。声明在 init 前面，不然会被 = false 盖掉。 */
+    private var ordered = false
+
     init {
         // 默认口径跟 1.1.0 保持一致：一打开就是「自定义 3 2 5 任 任」，点开始就能跑。
-        customOn = true
-        groups.add(Group.legacy())
+        // 存过自己的牌面就用存过的 —— 悬浮球里改一格就写一次，重开 App 还在。
+        val savedCustom = TargetStore.load(ctx)
+        groups.addAll(savedCustom.specs.mapNotNull { Group.fromSpec(it) })
+        if (groups.isEmpty()) {
+            groups.add(Group.legacy())
+            customOn = true
+        } else {
+            customOn = savedCustom.on
+            ordered = savedCustom.ordered
+        }
         // 名单重启 App 后还在：这里读回来，改完立刻写回
         val saved = EnemyStore.load(ctx)
         enemyMode = saved.mode
@@ -120,8 +131,6 @@ class Overlay(private val ctx: Context) {
         borderMargin = MarginStore.load(ctx)
         Geom.setMargin(borderMargin)
     }
-
-    private var ordered = false
 
     private var mode = MODE_MAIN
 
@@ -388,6 +397,7 @@ class Overlay(private val ctx: Context) {
                 isChecked = ordered
                 setOnCheckedChangeListener { _, v ->
                     ordered = v
+                    persist()
                     // 勾选这一下还在分发，等它走完再重建面板，免得把正在点的控件拆掉
                     handler.post { render() }
                 }
@@ -478,6 +488,7 @@ class Overlay(private val ctx: Context) {
                     groups.removeAt(gi)
                     // 删空了就没法编辑了，留一组空壳（没勾自定义时它也不参与判定）
                     if (groups.isEmpty()) groups.add(Group.fresh())
+                    persist()
                     render()
                 })
             }
@@ -498,6 +509,7 @@ class Overlay(private val ctx: Context) {
         }
         b.addView(wideButton("+ 再加一组") {
             groups.add(Group.fresh())
+            persist()
             render()
         })
         b.addView(summaryView())
@@ -839,6 +851,7 @@ class Overlay(private val ctx: Context) {
         g.suit[editSlot] = s
         // 选了牌就不再是「不抽」；原来的截断点顺延到下一个还标着「不抽」的格子
         g.skip[editSlot] = false
+        persist()
         render()
     }
 
@@ -847,6 +860,7 @@ class Overlay(private val ctx: Context) {
         // 第 1 张不许「不抽」：一组至少要有一张牌
         if (editSlot <= 0) return
         g.skip[editSlot] = true
+        persist()
         render()
     }
 
@@ -856,6 +870,8 @@ class Overlay(private val ctx: Context) {
 
     private fun toggleCustom() {
         customOn = !customOn
+        // 勾没勾也是「上次的选择」的一部分，一起存
+        persist()
         // 第一次勾上先给一组默认牌面（原来那组 3 / 2 / 5 / 任 / 任），
         // 免得进去是空的、不知道从哪下手
         if (customOn && groups.isEmpty()) groups.add(Group.legacy())
@@ -873,6 +889,9 @@ class Overlay(private val ctx: Context) {
 
     private fun currentTarget(): TargetBase? =
         runCatching { Targets.combine(handNames(), specs(), ordered) }.getOrNull()
+
+    /** 把当前的自定义目标写回（每组一段 spec + 两个开关），下次打开还在。 */
+    private fun persist() = TargetStore.save(ctx, groups.map { it.spec() }, ordered, customOn)
 
     private fun hintText(): String =
         if (customOn && handSel.isNotEmpty()) "牌型和自定义一起判定，成任意一个就停" else ""
@@ -1118,6 +1137,26 @@ class Overlay(private val ctx: Context) {
                 for (i in 1 until Target.MAX_DRAWS) skip[i] = true
             }
 
+            /**
+             * 从 spec 字符串还原一格（`"5 5同 5同"` 里的某一行）。
+             *
+             * 用 `ordered = true` 解：Group 只管牌面，按不按顺序是外面的总开关。
+             * 解析不了（手改坏了 / 老写法）就返回 null，调用方直接跳过这一组。
+             */
+            fun fromSpec(spec: String): Group? {
+                val t = runCatching { Targets.parse(spec, ordered = true) }.getOrNull()
+                    ?: return null
+                if (t.wants.isEmpty()) return null
+                val g = Group()
+                t.wants.forEachIndexed { i, w ->
+                    if (i < Target.MAX_DRAWS) {
+                        g.point[i] = w.point
+                        g.suit[i] = w.suit
+                    }
+                }
+                for (i in t.wants.size until Target.MAX_DRAWS) g.skip[i] = true
+                return g
+            }
         }
     }
 

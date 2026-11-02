@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 
+from . import config
 from .deck import MAX_DRAWS, reachable
 from .rules import (HAND_NAME_CN, MULT, POINT_ANY, SUITS, SUIT_SAME, SUIT_UNKNOWN,
                     Card, Hand, all_hands)
@@ -129,6 +130,11 @@ class CustomTarget(TargetBase):
     def label(self) -> str:
         body = " ".join(self._fmt(c) for c in self.cards)
         return f"自定义({body}{'，按顺序' if self.ordered else ''})"
+
+    @property
+    def spec(self) -> str:
+        """写回 config.json 的写法（"5同 5同"），parse() 能原样读回来。"""
+        return " ".join(self._fmt(c) for c in self.cards)
 
     # ---------------------------------------------------------- 判定
     @property
@@ -368,6 +374,45 @@ def estimate_attempts(target: TargetBase) -> float:
     else:
         p = completion_probability_pred(lambda cards: target.matches(cards))
     return 1.0 / p if p > 0 else float("inf")
+
+
+# ---------------------------------------------------------------- 存档
+# 和敌人名单一样放 config.json（exe 旁边），重开、升级都不会丢。
+
+CONFIG_KEY = "custom"
+
+
+def load_custom_targets() -> list["CustomTarget"]:
+    """读回上次写好的自定义目标；没有或者读坏了都返回空表。
+
+    每条自己带 ordered —— 界面上是一个总开关，但配置里分开存，
+    手改的时候不会把「按顺序」悄悄套到别的组上。
+    """
+    node = config.load().get(CONFIG_KEY)
+    items = node.get("items") if isinstance(node, dict) else None
+    out: list[CustomTarget] = []
+    if not isinstance(items, list):
+        return out
+    for it in items:
+        spec, ordered = it, False
+        if isinstance(it, dict):
+            spec, ordered = it.get("spec"), bool(it.get("ordered"))
+        if not isinstance(spec, str):
+            continue
+        try:
+            out.append(CustomTarget.parse(spec, ordered))
+        except ValueError:
+            continue        # 手改坏了的条目跳过，别让整个程序起不来
+    return out
+
+
+def store_custom_targets(targets: list["CustomTarget"]) -> bool:
+    """写回 config.json，其它键（敌人名单等）原样保留。"""
+    cfg = config.load()
+    cfg[CONFIG_KEY] = {
+        "items": [{"spec": t.spec, "ordered": t.ordered} for t in targets],
+    }
+    return config.save(cfg)
 
 
 def make_target(kind: str, spec: str | None = None, ordered: bool = False) -> TargetBase:
