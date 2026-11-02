@@ -31,8 +31,8 @@ from bqyw.enemies import (CN_MODE, MODE_CN, MODE_OFF, Book, Policy,  # noqa: E40
                           load_policy, store_policy)
 from bqyw.hotkey import parse  # noqa: E402
 from bqyw.privilege import is_admin, relaunch_as_admin  # noqa: E402
-from bqyw.rules import (HAND_NAME_CN, POINT_ANY, SUITS, SUIT_UNKNOWN, Card,  # noqa: E402
-                        Hand)
+from bqyw.rules import (HAND_NAME_CN, POINT_ANY, SUITS, SUIT_SAME,  # noqa: E402
+                        SUIT_UNKNOWN, Card, Hand)
 from bqyw.targets import (ANY, CustomTarget, HandTarget, MultiTarget,  # noqa: E402
                           estimate_attempts)
 
@@ -41,6 +41,7 @@ MULTI = "多选"
 # 多选面板里的展示顺序：由易到难，自定义垫底
 PICK_ORDER = ["对子", "两对", "三条", "顺子", "葫芦", "同花", "四条", "同花顺", "自定义"]
 MAX_ROWS = 5
+SAME = "同第一张"        # 下拉框里的写法，落到 Card 上是 SUIT_SAME（"同"）
 MAX_LOG_LINES = 4000        # 日志面板只留最近这么多行，文件里是全的
 NAME_TO_HAND = {v: k for k, v in HAND_NAME_CN.items()}
 NAME_TO_HAND["散牌"] = Hand.HIGH
@@ -364,7 +365,8 @@ class App(tk.Tk):
 
         ttk.Label(dlg, text="每一组都是「想要的一手牌」；写几组，达成任意一组就停手，不再往下抽。",
                   foreground="#333").pack(anchor="w", padx=12, pady=(10, 2))
-        ttk.Label(dlg, text="点数 / 花色选「任意」表示不挑；第 2 张起可以选「不抽」。",
+        ttk.Label(dlg, text="点数 / 花色选「任意」表示不挑；第 2 张起可以选「不抽」，"
+                            "花色还能选「同第一张」= 跟第 1 张同花。",
                   foreground="#777").pack(anchor="w", padx=12, pady=(0, 8))
 
         # 版面数据：[组][行] = (点数, 花色)，行数固定 MAX_ROWS
@@ -375,7 +377,8 @@ class App(tk.Tk):
                 if i < len(t.cards):
                     c = t.cards[i]
                     g.append((ANY if c.point == POINT_ANY else str(c.point),
-                              ANY if c.suit == SUIT_UNKNOWN else c.suit))
+                              SAME if c.suit == SUIT_SAME
+                              else (ANY if c.suit == SUIT_UNKNOWN else c.suit)))
                 else:
                     g.append(("不抽", ANY))
             groups.append(g)
@@ -383,8 +386,13 @@ class App(tk.Tk):
             groups = [[("1", ANY), ("不抽", ANY), ("不抽", ANY), ("不抽", ANY), ("不抽", ANY)]]
 
         body = ttk.Frame(dlg)
-        body.pack(fill="x", padx=12)
         rows_of: list[list[list]] = []          # 每组每行的 [vp, vs, pc, sc]
+
+        v_ord = tk.BooleanVar(value=self.custom_targets[0].ordered
+                              if self.custom_targets else False)
+        cb_ord = ttk.Checkbutton(
+            dlg, text="按顺序（第 1 张必须是指定的第 1 张…，对每组都生效）",
+            variable=v_ord)
 
         def sync_back():
             for gi, rows in enumerate(rows_of):
@@ -422,8 +430,10 @@ class App(tk.Tk):
                     pc = ttk.Combobox(f, textvariable=vp, values=opts, width=6,
                                       state="readonly")
                     pc.pack(side="left", padx=(0, 6))
-                    sc = ttk.Combobox(f, textvariable=vs, values=[ANY] + list(SUITS),
-                                      width=7, state="readonly")
+                    # 「同第一张」只从第 2 张起才有意义：第 1 张没有可跟的
+                    suits = [ANY] + list(SUITS) + ([SAME] if i else [])
+                    sc = ttk.Combobox(f, textvariable=vs, values=suits, width=8,
+                                      state="readonly")
                     sc.pack(side="left")
                     pc.bind("<<ComboboxSelected>>", lambda _e, r=rows: grey_out(r))
                     rows.append([vp, vs, pc, sc])
@@ -446,15 +456,13 @@ class App(tk.Tk):
             render()
 
         render()
+        # pack 的先后就是上下位置：按顺序 → 各组 → 按钮
+        cb_ord.pack(anchor="w", padx=12, pady=(4, 4))
+        body.pack(fill="x", padx=12)
 
         bar = ttk.Frame(dlg)
         bar.pack(fill="x", padx=12, pady=(0, 4))
         ttk.Button(bar, text="+ 再加一组", command=add_group).pack(side="left")
-
-        v_ord = tk.BooleanVar(value=self.custom_targets[0].ordered
-                              if self.custom_targets else False)
-        ttk.Checkbutton(dlg, text="按顺序（第 1 张必须是指定的第 1 张…，对每组都生效）",
-                        variable=v_ord).pack(anchor="w", padx=12, pady=(4, 4))
 
         btns = ttk.Frame(dlg)
         btns.pack(fill="x", padx=12, pady=(4, 12))
@@ -470,7 +478,8 @@ class App(tk.Tk):
                     if p == "不抽":
                         continue
                     point = POINT_ANY if p == ANY else int(p)
-                    cards.append(Card(point, SUIT_UNKNOWN if s == ANY else s))
+                    cards.append(Card(point, SUIT_SAME if s == SAME
+                                      else (SUIT_UNKNOWN if s == ANY else s)))
                 if not cards:
                     continue
                 try:
@@ -521,7 +530,9 @@ class App(tk.Tk):
         if getattr(self, "_est_want", None) != key:
             return                       # 已经切到别的目标了，这条作废
         if not n or n > 1e7:
-            self.lbl_est.configure(text=f"{target} ｜ 基本抽不到")
+            # inf 是精确的 0 概率（牌堆里根本没有这么多张），别和「概率极小」混为一谈
+            why = "按现在的牌堆凑不出来" if n == float("inf") else "基本抽不到"
+            self.lbl_est.configure(text=f"{target} ｜ {why}")
             return
         per_round = 5.0        # 实测：抽牌节拍 1.4s/张，平均抽 3.3 张就撤，加放弃 0.8s
         mins = n * per_round / 60

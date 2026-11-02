@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """自定义目标自检：python tests/test_targets.py"""
+import math
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bqyw.rules import (POINT_ANY, SUIT_SUO, SUIT_TONG, SUIT_UNKNOWN,  # noqa: E402
-                        SUIT_WAN, Card)
+from bqyw.rules import (POINT_ANY, SUIT_SAME, SUIT_SUO, SUIT_TONG,  # noqa: E402
+                        SUIT_UNKNOWN, SUIT_WAN, Card)
 from bqyw.rules import Hand  # noqa: E402
 from bqyw.targets import (CustomTarget, HandTarget, MultiTarget,  # noqa: E402
                           UnionTarget, estimate_attempts)
@@ -100,6 +101,63 @@ check("任意三张必中", estimate_attempts(CustomTarget.parse("任意 任意 
 p = (12 / 34) * (11 / 33) * (10 / 32)
 check("三张任意筒", round(estimate_attempts(CustomTarget.parse("任意筒 任意筒 任意筒", ordered=True)), 1),
       round(1 / p, 1))
+
+# ---------------------------------------------------------------- 与第一张同花
+# 第 2 张起花色可以写「同」：跟第 1 格那张抽到的牌一个花色。刷「整手同色」靠它。
+# 不用勾「按顺序」：无序判时先挑一张当第 1 格，剩下的再派。
+check("解析 同", [(c.point, c.suit) for c in CustomTarget.parse("5 5同").cards],
+      [(5, SUIT_UNKNOWN), (5, SUIT_SAME)])
+check("同 的几种写法", [(c.point, c.suit) for c in CustomTarget.parse("任意 任意同第一张").cards],
+      [(POINT_ANY, SUIT_UNKNOWN), (POINT_ANY, SUIT_SAME)])
+check("label 里写同", CustomTarget.parse("5 5同", ordered=True).label, "自定义(5? 5同，按顺序)")
+
+chain = CustomTarget.parse("5 5同 5同 5同")
+check("四张都同色", chain.matches([C(5, "筒")] * 4), True)
+check("第 1 张选什么都行", chain.matches([C(5, "索")] * 4), True)
+check("中途换色就废", chain.matches([C(5, "筒"), C(5, "筒"), C(5, "索"), C(5, "索")]), False)
+check("点数也得对", chain.matches([C(4, "筒"), C(5, "筒"), C(5, "筒"), C(5, "筒")]), False)
+# 花色认不出（'?'）就当没认出来：不能拿两个 '?' 冒充同色
+check("花色认不出不算同色", chain.matches([C(5, "?"), C(5, "?"), C(5, "筒"), C(5, "筒")]), False)
+check("认不出就继续抽", chain.possible([C(5, "?"), C(5, "筒")], 3), False)
+
+# 无序：谁先谁后不影响，只要都能派进去
+check("无序 5 5同 同色成立", CustomTarget.parse("5 5同").matches([C(5, "索"), C(5, "索")]), True)
+check("无序 5 5同 异色不成立", CustomTarget.parse("5 5同").matches([C(5, "索"), C(5, "筒")]), False)
+check("无序：第 1 格定了花色就得跟它",
+      CustomTarget.parse("5筒 5同").matches([C(5, "索"), C(5, "索")]), False)
+check("无序：第 1 格点数也得对", CustomTarget.parse("3 5同").matches([C(5, "索"), C(3, "索")]), True)
+check("无序也能直接命中四张", chain.matches([C(5, "筒")] * 4), True)
+
+check("还没抽时还有戏", chain.possible([], 5), True)
+check("抽一张 5筒 还有戏", chain.possible([C(5, "筒")], 4), True)
+check("抽一张 5索 也有戏", chain.possible([C(5, "索")], 4), True)
+check("抽成 4索 就废了", chain.possible([C(4, "索")], 4), False)
+check("两张不同色就废了", chain.possible([C(5, "索"), C(5, "筒")], 3), False)
+
+# 概率：有序时「第 1 张定调」，条件概率按花色张数累加
+#   任意 + 任意同 → Σ_s n_s(n_s-1) / (34·33)，n = 12/11/11
+check("任意 任意同 概率", round(estimate_attempts(CustomTarget.parse("任意 任意同", ordered=True)), 3),
+      round(1122 / 352, 3))
+#   5 + 5同 → Σ_s n5s(n5s-1) / (34·33)，n5s = 4/3/3
+check("5 5同 概率", round(estimate_attempts(CustomTarget.parse("5 5同", ordered=True)), 2),
+      round(1122 / 24, 2))
+# 无序和有序是同一件事（都要求这几张同色），概率应该对得上
+check("无序 5 5同 = 有序", round(estimate_attempts(CustomTarget.parse("5 5同")), 6),
+      round(estimate_attempts(CustomTarget.parse("5 5同", ordered=True)), 6))
+check("无序 5 5同 5同 = 有序", round(estimate_attempts(CustomTarget.parse("5 5同 5同")), 6),
+      round(estimate_attempts(CustomTarget.parse("5 5同 5同", ordered=True)), 6))
+# 5 点最多只有 4 张同色，要 5 张全同色的 5 就是凑不出来（牌堆模型口径）
+check("5 张全同色的 5 凑不出来",
+      math.isinf(estimate_attempts(CustomTarget.parse("5 5同 5同 5同 5同"))), True)
+check("5 张全同色 有序也凑不出来",
+      math.isinf(estimate_attempts(CustomTarget.parse("5 5同 5同 5同 5同", ordered=True))), True)
+
+try:
+    CustomTarget((Card(5, SUIT_SAME),), ordered=True)
+except ValueError:
+    OK.append("第 1 张不能写同")
+else:
+    raise AssertionError("第 1 张写同应该报错")
 
 # ---------------------------------------------------------------- 并集
 # 主 同花顺 + 保底 顺子：手里 4 张顺子要继续搏，搏不到就收顺子

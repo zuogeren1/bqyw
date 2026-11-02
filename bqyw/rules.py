@@ -29,6 +29,10 @@ SUIT_WAN = "萬"
 SUITS = (SUIT_TONG, SUIT_SUO, SUIT_WAN)
 SUIT_UNKNOWN = "?"
 
+# 「与上一张同花」：只在自定义目标里出现，意思是「花色跟上一张实际抽到的牌一样」。
+# 没有绝对花色，靠位置才说得清，所以带它的目标必须按顺序判。
+SUIT_SAME = "同"
+
 # 目标里的「任意点数」：只有 CustomTarget 会用到，抽出来的真牌永远是 1..5
 POINT_ANY = 0
 
@@ -36,7 +40,7 @@ POINT_ANY = 0
 @dataclass(frozen=True, order=True)
 class Card:
     point: int                    # 战力点 1..5；0 = 任意（仅用于目标描述）
-    suit: str = SUIT_UNKNOWN      # 花色；暂不认识时用 '?'
+    suit: str = SUIT_UNKNOWN      # 花色；'?' 是暂不认识，'同' 是「与上一张同花」（仅目标用）
 
     def __post_init__(self):
         if not 0 <= self.point <= 5:

@@ -230,9 +230,11 @@ def build_parser():
     pr.add_argument("--target", default="四条",
                     help=f"目标牌型 {list(NAME_TO_HAND)}，也可以是「自定义」")
     pr.add_argument("--custom", default=None,
-                    help='自定义 1~5 张，如 "3筒 3筒 3索 5萬 5"；'
-                         '没写花色=任意，点数写「任意」=不挑点数（可带花色，如 任意筒）')
-    pr.add_argument("--ordered", action="store_true", help="自定义目标按抽取顺序严格匹配")
+                    help='自定义 1~5 张，如 "3筒 3筒 3索 5萬 5"；没写花色=任意，'
+                         '点数写「任意」=不挑点数（可带花色，如 任意筒），'
+                         '花色写「同」=与第一张同花（如 "5 5同 5同"，不用 --ordered 也行）')
+    pr.add_argument("--ordered", action="store_true",
+                    help="自定义目标按抽取顺序严格匹配（牌面里用了「同」时必须开）")
     pr.add_argument("--fallback", default=None,
                     help="再加几个能接受的目标，逗号分隔（如 --target 同花顺 --fallback 顺子,同花）")
     pr.add_argument("--lucky", default=None, help="今日好运组合（同花顺/四条/同花/葫芦/顺子/三条/两对/对子）")

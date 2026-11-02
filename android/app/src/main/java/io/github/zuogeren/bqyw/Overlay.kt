@@ -109,8 +109,7 @@ class Overlay(private val ctx: Context) {
     private var footer: LinearLayout? = null
 
     init {
-        // 默认口径跟 1.1.0 保持一致：老版本一打开就是「自定义 3 2 5 任 任」，
-        // 点开始就能跑。改成空的等于每次都要先勾一下，没必要。
+        // 默认口径跟 1.1.0 保持一致：一打开就是「自定义 3 2 5 任 任」，点开始就能跑。
         customOn = true
         groups.add(Group.legacy())
         // 名单重启 App 后还在：这里读回来，改完立刻写回
@@ -533,6 +532,14 @@ class Overlay(private val ctx: Context) {
         }
         b.addView(row)
 
+        // 「同第一张」只有第 2 张起才有意义：第 1 张没有可跟的
+        if (editSlot > 0) {
+            b.addView(
+                Ui.text(ctx, "「5同」= 5 点，花色跟第 1 格那张一样（不必按顺序）", 10.5f, Ui.DIM2)
+                    .apply { setPadding(0, px(2), 0, px(2)) },
+            )
+        }
+
         // 第 1 张只能是牌；第 2 张起可以先选「不抽」，把这一组截短
         val head = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         val skip = g.skip[editSlot]
@@ -541,16 +548,25 @@ class Overlay(private val ctx: Context) {
             head.addView(cell("不抽", 54, on = skip) { pickSkip() })
         }
         b.addView(head)
+        // 第 2 张起多一列「同」：一行塞 5 格，格子窄一点，总宽和原来 4 格差不多
+        val cw = if (editSlot > 0) 42 else 54
         for (p in 1..5) {
             val prow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
             prow.addView(
-                cell(p.toString(), 54,
+                cell(p.toString(), cw,
                     on = !skip && g.point[editSlot] == p && g.suit[editSlot] == 0) { pickSlot(p, 0) },
             )
             for (s in 1..3) {
                 prow.addView(
-                    cell(p.toString() + Target.SUIT_CN[s], 54,
+                    cell(p.toString() + Target.SUIT_CN[s], cw,
                         on = !skip && g.point[editSlot] == p && g.suit[editSlot] == s) { pickSlot(p, s) },
+                )
+            }
+            if (editSlot > 0) {
+                prow.addView(
+                    cell(p.toString() + "同", cw,
+                        on = !skip && g.point[editSlot] == p &&
+                            g.suit[editSlot] == Target.SUIT_SAME) { pickSlot(p, Target.SUIT_SAME) },
                 )
             }
             b.addView(prow)
@@ -1079,9 +1095,11 @@ class Overlay(private val ctx: Context) {
             // 截断点和它后面的格子都显示成「不抽」，跟 PC 版下拉框看到的是一回事
             if (i >= len) return "不抽"
             val p = point[i]
-            if (p == 0) return "任"
-            return if (suit[i] == 0) p.toString() else p.toString() + Target.SUIT_CN[suit[i]]
+            val s = suit[i]
+            if (p == 0) return if (s == 0) "任" else "任" + Target.SUIT_CN[s]
+            return if (s == 0) p.toString() else p.toString() + Target.SUIT_CN[s]
         }
+
 
         /** 交给 Targets.parse 的写法；「不抽」之后的格子不写进去。 */
         fun spec(): String = (0 until len).joinToString(" ") { fmt(it) }
@@ -1099,6 +1117,7 @@ class Overlay(private val ctx: Context) {
                 point[0] = 1
                 for (i in 1 until Target.MAX_DRAWS) skip[i] = true
             }
+
         }
     }
 

@@ -42,6 +42,15 @@ data class Target(
     val ordered: Boolean = false,
 ) : TargetBase {
 
+    init {
+        // 「同第一张」总得有个「第一张」：第 1 格自己跟自己没意义
+        wants.forEachIndexed { i, w ->
+            if (w.suit == SUIT_SAME) {
+                require(i > 0) { "第 1 张没有「第一张」可跟，不能选「同第一张」" }
+            }
+        }
+    }
+
     override val stopCount: Int
         get() = if (hand != null) MAX_DRAWS else wants.size
 
@@ -54,13 +63,8 @@ data class Target(
         if (hand != null) return Hands.best(cards) == hand
         // 张数对不上就不算：自定义目标要的就是这一手刚刚好这么多张
         if (cards.size != wants.size) return false
-        if (ordered) {
-            for (i in wants.indices) {
-                if (!one(cards[i], wants[i])) return false
-            }
-            return true
-        }
-        return fit(wants.toMutableList(), cards)
+        if (ordered) return inOrder(cards)
+        return fitAnyRef(cards, exact = true)
     }
 
     /**
@@ -72,17 +76,52 @@ data class Target(
     override fun possible(cards: List<Card>, left: Int): Boolean {
         if (hand != null) return Deck.reachable(cards, hand, left)
         if (cards.size > wants.size) return false
-        if (ordered) {
-            for (i in cards.indices) {
-                if (!one(cards[i], wants[i])) return false
-            }
-            return true
-        }
-        return fits(wants.toMutableList(), cards)
+        if (ordered) return inOrder(cards)
+        return fitAnyRef(cards, exact = false)
     }
 
+    /** 这一张对不对得上这个目标位（不含「同」，那个要把整手放在一起看）。 */
     private fun one(c: Card, w: Card): Boolean =
         (w.point == 0 || w.point == c.point) && (w.suit == 0 || w.suit == c.suit)
+
+    /** 按位置逐个对：「同」格要跟第 1 格那张同花。 */
+    private fun inOrder(cards: List<Card>): Boolean {
+        val ref = cards.firstOrNull()?.suit ?: 0
+        for (i in cards.indices) {
+            val w = wants[i]
+            if (w.suit == SUIT_SAME) {
+                // 花色认不出来（0）就不算：宁可继续抽，也别拿两个 0 冒充同色
+                if (ref == 0 || cards[i].suit == 0 || cards[i].suit != ref) return false
+            } else if (!one(cards[i], w)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * 无序判定：先挑一张当「第 1 格」，把「同」钉成它的花色，剩下的照常派。
+     *
+     * [exact] = true 是判命中（张数必须一样）；false 是判还有没有戏 ——
+     * 这时「第 1 格」可能还没抽到，那就只要求几个「同」格彼此同色。
+     */
+    private fun fitAnyRef(cards: List<Card>, exact: Boolean): Boolean {
+        if (wants.none { it.suit == SUIT_SAME }) return fit(wants.toMutableList(), cards)
+        val want0 = wants[0]
+        val rest = wants.subList(1, wants.size)
+        cards.forEachIndexed { j, c ->
+            if (c.suit == 0 || !one(c, want0)) return@forEachIndexed
+            val slots = rest.map { if (it.suit == SUIT_SAME) Card(it.point, c.suit) else it }
+            val others = cards.filterIndexed { k, _ -> k != j }
+            if (fits(slots.toMutableList(), others)) return true
+        }
+        if (exact) return false
+        for (s in 1..3) {
+            val slots = rest.map { if (it.suit == SUIT_SAME) Card(it.point, s) else it }
+            if (fits(slots.toMutableList(), cards)) return true
+        }
+        return false
+    }
 
     /** 把 drawn 一张张派进 slots，派得进去就叫还有戏（空位后面再抽）。 */
     private fun fits(slots: MutableList<Card>, drawn: List<Card>): Boolean {
@@ -120,7 +159,8 @@ data class Target(
     private fun describe(): String {
         return wants.joinToString(" ") { w ->
             when {
-                w.point == 0 -> "任意"
+                w.point == 0 && w.suit == 0 -> "任意"
+                w.point == 0 -> "任" + SUIT_CN[w.suit]
                 w.suit == 0 -> w.point.toString()
                 else -> w.point.toString() + SUIT_CN[w.suit]
             }
@@ -132,7 +172,10 @@ data class Target(
         /** 一手最多抽几张：牌型目标一律按 5 张算。 */
         const val MAX_DRAWS = 5
 
-        val SUIT_CN = arrayOf("", "萬", "筒", "索")
+        /** 「与上一张同花」：花色跟着上一格抽到的那张走，只在自定义目标里出现。 */
+        const val SUIT_SAME = 4
+
+        val SUIT_CN = arrayOf("", "萬", "筒", "索", "同")
     }
 }
 
@@ -237,13 +280,15 @@ object Targets {
 
     private fun card(tok: String): Card {
         if (tok == "任意" || tok == "任" || tok == "?" || tok == "any") return Card(0, 0)
-        val m = Regex("^([1-5])([萬筒索]?)$").find(tok)
+        if (tok == "任同" || tok == "任意同" || tok == "同上") return Card(0, Target.SUIT_SAME)
+        val m = Regex("^([1-5])([萬筒索同]?)$").find(tok)
             ?: throw IllegalArgumentException("看不懂：" + tok)
         val p = m.groupValues[1].toInt()
         val s = when (m.groupValues[2]) {
             "萬" -> 1
             "筒" -> 2
             "索" -> 3
+            "同" -> Target.SUIT_SAME
             else -> 0
         }
         return Card(p, s)
