@@ -381,13 +381,25 @@ class Bot:
         deadline = time.time() + window
         while time.time() < deadline and not self.stopped():
             gap = time.time() - self._last_click_at
-            if gap < self.click_delay:
-                # 还没到节拍：直接睡到点。这里**不查手牌** —— 上一张已经读到了，
-                # 等待期间不可能凭空多一张；每轮查一次要 26ms，全加在间隔上了。
+            if gap + 0.04 < self.click_delay:
+                # 离这一拍还早：纯睡。这里**不查手牌** —— 每查一次要 20ms，
+                # 全加在间隔上了。
                 remain = self.click_delay - gap
                 self._t["idle"] += min(remain, 0.05)
                 time.sleep(min(remain, 0.05))
                 continue
+
+            # 到点了（或者这一拍本来就不用等）。**点之前先看一眼手牌**：
+            # 上一拍的牌可能是"余波" —— 翻牌动画比节拍慢，或者主循环的读数比牌桌少
+            # 一张（read_state 只等两帧一致就采信）。这时牌桌已经比 before 多一张，
+            # 再点下去，这一下点击的牌会落在命中/放弃判定之后 —— 就是"多抽一张"；
+            # 对同花、自定义这种张数固定的目标，等于把刚凑好的手直接作废。
+            # 读牌放在节拍尾巴上（上面那个 0.04 的余量）：读多久都从这一拍里扣，
+            # 点击时刻仍由 _last_click_at 锚定，1.4s 的节拍不受影响。
+            cards = self.hand_now()
+            if len(cards) > before:
+                self.note_card(cards, before)
+                return cards
 
             # 计时从"开始点"算：一次点击本身要 110ms，算在间隔里会让每一张都慢 0.1s
             clicked_at = self._last_click_at = time.time()
@@ -399,14 +411,21 @@ class Bot:
                 time.sleep(0.4)          # 只读模式不会真翻牌，别在这耗满 6 秒
                 return self.hand_now()
 
-            # 等这张牌：正常半秒左右翻出来，超过 CARD_LATENCY 就是点空了
+            # 等这张牌：正常半秒左右翻出来，超过 CARD_LATENCY 就是点空了。
+            # 判据是"张数变多 **且** 连续两帧完全一致"：翻牌动画中途能扫到数字残影
+            # （read_state 也是同一个口径）。只凭一帧就下结论的话，残影会被当成这一次
+            # 点击的成果 —— 这次点击就没人等了，它的牌落在判定之后，多出来的那张正是
+            # 这么来的。
             reveal = clicked_at + CARD_LATENCY
+            prev_key = None
             while time.time() < reveal and not self.stopped():
                 cards = self.hand_now()
-                if len(cards) > before:
+                key = tuple((c.point, c.suit) for c in cards)
+                if len(cards) > before and key == prev_key:
                     self._t["card"] += time.time() - clicked_at
                     self.note_card(cards, before)
                     return cards
+                prev_key = key
                 time.sleep(0.02)
 
             if self.click_delay < CLICK_DELAY_MAX:

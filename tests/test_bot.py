@@ -237,6 +237,95 @@ def main():
         check("冷却更长 节拍自动调大", round(b12.click_delay, 2), 1.59)
         check("冷却更长 只点了两次", b12.stats.clicks, 2)
 
+        # ------------------------------ 点之前先看牌：桌上已经多一张就不许再点
+        # 主循环的读数可能比牌桌少一张（翻牌动画没走完、read_state 只等到两帧一致就
+        # 采信）。这时 draw() 手里是旧的 before，一点下去就是对着已经成型的手盲抽，
+        # 而这一下点击的牌会落在命中/放弃判定之后 —— 就是"多抽一张"。
+        t13 = Table([MISS])
+        t13.cards = [Card(5, SUIT_SUO)]
+        b13 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
+                    dry_run=False, verbose=False, logger=lambda s: None)
+        b13.hotkey = ""
+        b13.ts = FakeTS(t13)
+        b13.act = lambda box, what: t13.cards.append(t13.next_card())
+        got13 = b13.draw(0)
+        check("桌上已多一张 一下都不点", b13.stats.clicks, 0)
+        check("桌上已多一张 直接交出来", len(got13), 1)
+        check("桌上已多一张 照样记账", b13.stats.draws, 1)
+
+        # ------------------------------ 残影不算牌：张数变多且连续两帧一致才认
+        # 翻牌动画中途能扫到"其实还没翻出来"的那一张。只凭一帧就返回等于这次点击
+        # 没人等，它的牌会落在判定之后。这里让残影闪一帧就消失，0.25s 后才真翻出来，
+        # 而且残影那张的花色特意和真牌不同 —— 认错了直接看得出来。
+        real2 = [Card(5, SUIT_SUO), Card(2, SUIT_TONG)]
+        ghost2 = [Card(5, SUIT_SUO), Card(4, SUIT_WAN)]
+        t14 = Table([MISS])
+        t14.cards = [Card(5, SUIT_SUO)]
+        b14 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
+                    dry_run=False, verbose=False, logger=lambda s: None)
+        b14.hotkey = ""
+        b14.ts = FakeTS(t14)
+        clicked = {}
+
+        def act14(box, what):
+            clicked["at"] = time.time()          # 只记时刻，牌由 hand14 演
+
+        def hand14():
+            at = clicked.get("at")
+            if at is None:
+                return [Card(5, SUIT_SUO)]       # 点之前：一张
+            dt = time.time() - at
+            if dt < 0.012:
+                return list(ghost2)              # 刚点下就闪一帧残影
+            if dt < 0.25:
+                return [Card(5, SUIT_SUO)]       # 残影消失，还是那一张
+            return list(real2)                   # 真翻出来了
+
+        b14.act = act14
+        b14.hand_now = hand14
+        got14 = b14.draw(1)
+        check("残影不算牌 只点一下", b14.stats.clicks, 1)
+        check("残影不算牌 交的是真牌", [(c.point, c.suit) for c in got14],
+              [(5, SUIT_SUO), (2, SUIT_TONG)])
+        check("残影不算牌 只记一张", b14.stats.draws, 1)
+
+        # ------------------------------ 牌比 CARD_LATENCY 慢：补点之前先看牌
+        # 真机翻牌动画能到 1.3s。老代码到点就无条件补一下，补出来的那张牌落在判定
+        # 之后；新代码补之前先看一眼，牌已经到了就直接交出去，不再点。
+        class SlowTable(Table):
+            """点了之后 delay 秒才翻出牌，用来演"牌比 CARD_LATENCY 慢"。"""
+
+            def __init__(self, hands, delay):
+                super().__init__(hands)
+                self.delay = delay
+                self.due = 0.0
+
+            def tick(self):
+                if self.due and time.time() >= self.due:
+                    self.due = 0.0
+                    self.cards.append(self.next_card())
+
+        class SlowTS(FakeTS):
+            def read_hand(self, frame, ox=0, oy=0):
+                self.table.tick()
+                return list(self.table.cards)
+
+        t15 = SlowTable([MISS], delay=1.0)
+        b15 = B.Bot(capture=FakeCap(), target=CustomTarget.parse("5 5 5 5 5"),
+                    dry_run=False, verbose=False, logger=lambda s: None)
+        b15.hotkey = ""
+        b15.ts = SlowTS(t15)
+
+        def act15(box, what):
+            # 只有第一下真的被游戏吃下、开始翻牌；补点时牌还在翻，冷却会把这一下吞掉
+            if not t15.due:
+                t15.due = time.time() + t15.delay
+
+        b15.act = act15
+        got15 = b15.draw(0)
+        check("牌晚到 只点一下", b15.stats.clicks, 1)
+        check("牌晚到 照样拿到牌", len(got15), 1)
+
         # ------------------------------------------------ 放弃前的轮次复核
         class BadRound(FakeTS):
             def read_round_patch(self, patch, min_score=0.55):
